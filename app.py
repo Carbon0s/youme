@@ -41,11 +41,12 @@ socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins="*")
 # ==========================================
 # ВСПОМОГАТЕЛЬНАЯ ЛОГИКА И ПРАВА (SUDO)
 # ==========================================
+
 def moscow_utcnow():
     return datetime.now(timezone(timedelta(hours=3)))
 
-# Это магическая строка — теперь везде datetime.utcnow() будет возвращать время Москвы
 datetime.utcnow = moscow_utcnow
+datetime.datetime.utcnow = moscow_utcnow  # важно!
 
 def format_bday(bd_str):
     if not bd_str or "." not in bd_str:
