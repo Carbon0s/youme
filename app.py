@@ -1,25 +1,21 @@
-# ЭТИ ДВЕ СТРОКИ ДОЛЖНЫ БЫТЬ В САМОМ НАЧАЛЕ ФАЙЛА
-import eventlet
-eventlet.monkey_patch()
+# ПАТЧ ДЛЯ GEVENT - ДОЛЖЕН БЫТЬ ПЕРВОЙ СТРОКОЙ
+from gevent import monkey
+monkey.patch_all()
 
 import os
 from datetime import datetime
-from flask import Flask, request, redirect, url_for, flash, session, jsonify, render_template_string, \
-    send_from_directory
+from flask import Flask, request, redirect, url_for, flash, session, jsonify, render_template_string, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
-from flask_socketio import SocketIO, emit, join_room, leave_room
-from werkzeug.security import generate_password_hash, check_password_hash
+from flask_socketio import SocketIO, emit, join_room
 
 # ==========================================
 # КОНФИГУРАЦИЯ ПРИЛОЖЕНИЯ
 # ==========================================
 app = Flask(__name__)
-
-# На Render лучше передавать секретный ключ через переменные окружения
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'super-secret-key-for-youme-12345')
 
-# Подключение к PostgreSQL Aiven с безопасной заменой префикса
+# Подключение к PostgreSQL Aiven (исправление префикса для Render)
 db_url = os.environ.get(
     'DATABASE_URL', 
     "postgresql://avnadmin:AVNS_A094KJpWYOSX9t3_eM6@youme-krossmag.l.aivencloud.com:25520/defaultdb?sslmode=require"
@@ -30,21 +26,20 @@ if db_url.startswith("postgres://"):
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# ОПТИМИЗАЦИЯ ДЛЯ RENDER + AIVEN (Решает проблему огромных задержек)
+# ОПТИМИЗАЦИЯ ПУЛА СОЕДИНЕНИЙ (УБИРАЕТ ЗАДЕРЖКИ ПРИ ОТКРЫТИИ СТРАНИЦ)
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    'pool_size': 10,             # Количество одновременных постоянных соединений
-    'pool_recycle': 280,         # Пересоздавать соединения каждые 280 секунд (до того как Render убьет их за неактивность)
-    'pool_pre_ping': True,       # Быстрая проверка "живо ли соединение" перед выполнением запроса
-    'pool_timeout': 20,          # Максимальное время ожидания свободного соединения
-    'max_overflow': 15           # Дополнительные временные соединения при пиковых нагрузках
+    'pool_size': 10,             
+    'pool_recycle': 280,         # Предотвращает разрыв соединения со стороны Aiven
+    'pool_pre_ping': True,       # Проверяет соединение перед запросом (убирает зависания)
+    'pool_timeout': 20,          
 }
 
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
-
+# Инициализация SocketIO с использованием gevent
+socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins="*")
 
 # ==========================================
 # ВСПОМОГАТЕЛЬНАЯ ЛОГИКА
@@ -60,7 +55,6 @@ def format_bday(bd_str):
         return f"{d} {m_str} {y}г."
     except:
         return bd_str
-
 
 # ==========================================
 # МОДЕЛИ БАЗЫ ДАННЫХ
@@ -88,7 +82,6 @@ class User(UserMixin, db.Model):
     promoted_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-
 class Contact(db.Model):
     __tablename__ = 'contacts'
     id = db.Column(db.Integer, primary_key=True)
@@ -96,20 +89,17 @@ class Contact(db.Model):
     contact_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     added_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-
 class Chat(db.Model):
     __tablename__ = 'chats'
     id = db.Column(db.Integer, primary_key=True)
     type = db.Column(db.String(20), default='private')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-
 class ChatParticipant(db.Model):
     __tablename__ = 'chat_participants'
     id = db.Column(db.Integer, primary_key=True)
     chat_id = db.Column(db.Integer, db.ForeignKey('chats.id'), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-
 
 class Message(db.Model):
     __tablename__ = 'messages'
@@ -121,11 +111,9 @@ class Message(db.Model):
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
     is_read = db.Column(db.Boolean, default=False)
 
-
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
-
 
 # ==========================================
 # ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
@@ -539,7 +527,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 imagePreview: null,
                 typing: {},
 
-                // Профиль
                 showProfileModal: false,
                 isMyProfile: false,
                 editMode: false,
@@ -1163,4 +1150,4 @@ init_db()
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    socketio.run(app, host='0.0.0.0', port=port, debug=True)
+    socketio.run(app, host='0.0.0.0', port=port, debug=False)
