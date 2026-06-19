@@ -240,6 +240,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         <span x-show="!myProfileData.avatar">{{ current_user.first_name[0] }}</span>
                     </div>
                     <img src="/logo.png" alt="You'Me" class="h-10 md:h-12 object-contain" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                    <span class="text-xs font-mono text-gray-500 ml-2">v0.3</span>
                     <div class="text-xl font-bold text-blue-500 tracking-wider" style="display:none;">You`me</div>
                 </div>
 
