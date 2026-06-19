@@ -10,6 +10,12 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 from flask_socketio import SocketIO, emit, join_room
 from sqlalchemy import text 
 
+def moscow_utcnow():
+    return datetime.now(timezone(timedelta(hours=3)))
+
+# Это магическая строка — теперь везде datetime.utcnow() будет возвращать время Москвы
+datetime.utcnow = moscow_utcnow
+
 # ==========================================
 # КОНФИГУРАЦИЯ ПРИЛОЖЕНИЯ
 # ==========================================
