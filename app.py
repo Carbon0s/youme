@@ -42,11 +42,9 @@ socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins="*")
 # ВСПОМОГАТЕЛЬНАЯ ЛОГИКА И ПРАВА (SUDO)
 # ==========================================
 
-def moscow_utcnow():
+def now_moscow():
+    """Возвращает текущее время в Москве"""
     return datetime.now(timezone(timedelta(hours=3)))
-
-datetime.utcnow = moscow_utcnow
-datetime.datetime.utcnow = moscow_utcnow  # важно!
 
 def format_bday(bd_str):
     if not bd_str or "." not in bd_str:
@@ -87,7 +85,7 @@ class User(UserMixin, db.Model):
     phone = db.Column(db.String(20), nullable=True)
     about_me = db.Column(db.Text, nullable=True)
     birth_date = db.Column(db.String(20), nullable=True)
-    last_seen = db.Column(db.DateTime, default=datetime.utcnow)
+    last_seen = db.Column(db.DateTime, default=now_moscow)
 
     show_phone = db.Column(db.Boolean, default=False)
     show_about = db.Column(db.Boolean, default=True)
@@ -101,20 +99,20 @@ class User(UserMixin, db.Model):
     perm_see_chatting_with = db.Column(db.Boolean, default=False)
 
     promoted_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=now_moscow)
 
 class Contact(db.Model):
     __tablename__ = 'contacts'
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     contact_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    added_at = db.Column(db.DateTime, default=datetime.utcnow)
+    added_at = db.Column(db.DateTime, default=now_moscow)
 
 class Chat(db.Model):
     __tablename__ = 'chats'
     id = db.Column(db.Integer, primary_key=True)
     type = db.Column(db.String(20), default='private')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=now_moscow)
 
 class ChatParticipant(db.Model):
     __tablename__ = 'chat_participants'
@@ -129,7 +127,7 @@ class Message(db.Model):
     sender_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     text = db.Column(db.Text, nullable=True)
     image_base64 = db.Column(db.Text, nullable=True)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    timestamp = db.Column(db.DateTime, default=now_moscow)
     is_read = db.Column(db.Boolean, default=False)
     
     is_deleted = db.Column(db.Boolean, default=False)
@@ -1127,7 +1125,7 @@ def login():
                 password=password,
                 first_name=request.form.get('first_name'),
                 last_name=request.form.get('last_name') or None,
-                last_seen=datetime.utcnow()
+                last_seen=now_moscow()
             )
             db.session.add(new_user)
             db.session.commit()
@@ -1148,7 +1146,7 @@ def login():
 @login_required
 def logout():
     session.pop('original_admin_id', None)
-    current_user.last_seen = datetime.utcnow()
+    current_user.last_seen = now_moscow()
     db.session.commit()
     logout_user()
     return redirect(url_for('login'))
@@ -1413,7 +1411,7 @@ def update_permissions(target_id):
 def admin_history_24h(target_id):
     if not (has_admin_priv() or current_user.is_moderator): return "Forbidden", 403
     
-    yesterday = datetime.utcnow() - timedelta(days=1)
+    yesterday = now_moscow() - timedelta(days=1)
     participants = ChatParticipant.query.filter_by(user_id=target_id).all()
     
     result = []
@@ -1479,7 +1477,7 @@ def handle_connect():
     if current_user.is_authenticated:
         join_room(f"user_{current_user.id}")
         connected_users[current_user.id] = request.sid
-        current_user.last_seen = datetime.utcnow()
+        current_user.last_seen = now_moscow()
         db.session.commit()
         broadcast_user_status(current_user.id)
 
@@ -1490,7 +1488,7 @@ def handle_disconnect():
         if current_user.id in active_chat_views: del active_chat_views[current_user.id]
         u = User.query.get(current_user.id)
         if u:
-            u.last_seen = datetime.utcnow()
+            u.last_seen = now_moscow()
             db.session.commit()
             broadcast_user_status(current_user.id)
 
@@ -1609,7 +1607,7 @@ def init_db():
             admin = User(
                 username='admin', password='admin',
                 first_name='Admin', last_name='',
-                is_admin=True, last_seen=datetime.utcnow()
+                is_admin=True, last_seen=now_moscow()
             )
             db.session.add(admin)
             db.session.commit()
