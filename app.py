@@ -1,3 +1,7 @@
+# ЭТИ ДВЕ СТРОКИ ДОЛЖНЫ БЫТЬ В САМОМ НАЧАЛЕ ФАЙЛА
+import eventlet
+eventlet.monkey_patch()
+
 import os
 from datetime import datetime
 from flask import Flask, request, redirect, url_for, flash, session, jsonify, render_template_string, \
@@ -12,11 +16,10 @@ from werkzeug.security import generate_password_hash, check_password_hash
 # ==========================================
 app = Flask(__name__)
 
-# На Render лучше передавать секретный ключ через переменные окружения.
+# На Render лучше передавать секретный ключ через переменные окружения
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'super-secret-key-for-youme-12345')
 
-# Подключение к PostgreSQL Aiven
-# Render иногда передает ссылку как postgres://, что ломает SQLAlchemy. Этот блок исправляет это:
+# Подключение к PostgreSQL Aiven с безопасной заменой префикса
 db_url = os.environ.get(
     'DATABASE_URL', 
     "postgresql://avnadmin:AVNS_A094KJpWYOSX9t3_eM6@youme-krossmag.l.aivencloud.com:25520/defaultdb?sslmode=require"
@@ -27,12 +30,20 @@ if db_url.startswith("postgres://"):
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+# ОПТИМИЗАЦИЯ ДЛЯ RENDER + AIVEN (Решает проблему огромных задержек)
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_size': 10,             # Количество одновременных постоянных соединений
+    'pool_recycle': 280,         # Пересоздавать соединения каждые 280 секунд (до того как Render убьет их за неактивность)
+    'pool_pre_ping': True,       # Быстрая проверка "живо ли соединение" перед выполнением запроса
+    'pool_timeout': 20,          # Максимальное время ожидания свободного соединения
+    'max_overflow': 15           # Дополнительные временные соединения при пиковых нагрузках
+}
+
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
-# Для продакшена на Render требуется async_mode='eventlet' вместо 'threading'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode=None)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 
 # ==========================================
@@ -63,10 +74,10 @@ class User(UserMixin, db.Model):
     last_name = db.Column(db.String(50), nullable=False)
     class_name = db.Column(db.String(20))
 
-    avatar_url = db.Column(db.Text, nullable=True)  # Base64
+    avatar_url = db.Column(db.Text, nullable=True)
     phone = db.Column(db.String(20), nullable=True)
     about_me = db.Column(db.Text, nullable=True)
-    birth_date = db.Column(db.String(20), nullable=True)  # Храним как строку "dd.mm.yyyy", чтобы не ломать старую БД
+    birth_date = db.Column(db.String(20), nullable=True)
     last_seen = db.Column(db.DateTime, default=datetime.utcnow)
 
     show_phone = db.Column(db.Boolean, default=False)
@@ -119,7 +130,7 @@ def load_user(user_id):
 # ==========================================
 # ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
 # ==========================================
-connected_users = {}  # {user_id: sid}
+connected_users = {}
 
 # ==========================================
 # HTML ШАБЛОНЫ (Jinja2 + Tailwind + Alpine)
@@ -544,7 +555,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     });
                     this.socket.on('new_message', (data) => {
                         if (this.currentChat && this.currentChat.chat_id === data.chat_id) {
-                            // Автоматически отмечаем прочитанным, если чат открыт
                             if(data.sender_id !== this.myId) {
                                 fetch('/api/chat/' + data.chat_id + '/messages').then(res => res.json()).then(msgs => {
                                     this.messages = msgs;
@@ -557,7 +567,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         }
                         this.loadChats();
                     });
-                    // Синхронизация галочек в реальном времени
                     this.socket.on('messages_read', (data) => {
                         if (this.currentChat && this.currentChat.chat_id === data.chat_id) {
                             this.messages.forEach(m => {
@@ -666,7 +675,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
                 async openChat(chat) {
                     this.currentChat = chat;
-                    // При открытии отправляем запрос, который сразу пометит сообщения как прочитанные и отдаст их
                     const res = await fetch('/api/chat/' + chat.chat_id + '/messages');
                     this.messages = await res.json();
                     this.scrollToBottom();
@@ -785,9 +793,7 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
 # ==========================================
 @app.route('/logo.png')
 def serve_logo():
-    # Отдаем файл logo.png, который должен лежать в одной папке со скриптом
     return send_from_directory(os.getcwd(), 'logo.png')
-
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -827,24 +833,19 @@ def login():
 
     return render_template_string(LOGIN_TEMPLATE)
 
-
 @app.route('/logout')
 @login_required
 def logout():
     session.pop('original_admin_id', None)
-
     current_user.last_seen = datetime.utcnow()
     db.session.commit()
-
     logout_user()
     return redirect(url_for('login'))
-
 
 @app.route('/')
 @login_required
 def index():
     return render_template_string(APP_TEMPLATE)
-
 
 # ==========================================
 # API ДЛЯ ПРОФИЛЯ
@@ -854,8 +855,6 @@ def index():
 def my_profile():
     if request.method == 'POST':
         data = request.json
-
-        # Обновляем имя, фамилию, username
         current_user.first_name = data.get('first_name', current_user.first_name)
         current_user.last_name = data.get('last_name', current_user.last_name)
 
@@ -865,7 +864,6 @@ def my_profile():
                 new_username = '@' + new_username
             current_user.username = new_username
 
-        # Собираем дату рождения из 3-х полей
         b_day = data.get('birth_day')
         b_month = data.get('birth_month')
         b_year = data.get('birth_year')
@@ -887,7 +885,6 @@ def my_profile():
         db.session.commit()
         return jsonify({'status': 'ok'})
 
-    # Для отображения разбиваем сохраненную строку даты обратно
     bd = current_user.birth_date
     b_day, b_month, b_year = "", "", ""
     if bd and "." in bd:
@@ -914,7 +911,6 @@ def my_profile():
         'is_online': True
     })
 
-
 @app.route('/api/profile/<int:user_id>')
 @login_required
 def get_user_profile(user_id):
@@ -935,7 +931,6 @@ def get_user_profile(user_id):
         'formatted_bday': format_bday(user.birth_date) if user.show_birth_date else None
     }
     return jsonify(data)
-
 
 # ==========================================
 # API ДЛЯ ЧАТОВ И ПОИСКА
@@ -968,7 +963,6 @@ def get_chats():
         })
     return jsonify(chats_data)
 
-
 @app.route('/api/search_users')
 @login_required
 def search_users():
@@ -993,7 +987,6 @@ def search_users():
         'is_admin': u.is_admin
     } for u in users])
 
-
 @app.route('/api/chat/start/<int:target_id>', methods=['POST'])
 @login_required
 def start_chat(target_id):
@@ -1017,11 +1010,9 @@ def start_chat(target_id):
         db.session.commit()
     return jsonify({'chat_id': chat_id})
 
-
 @app.route('/api/chat/<int:chat_id>/messages')
 @login_required
 def get_messages(chat_id):
-    # При загрузке чата помечаем входящие непрочитанные сообщения как прочитанные
     unread_msgs = Message.query.filter(Message.chat_id == chat_id, Message.sender_id != current_user.id,
                                        Message.is_read == False).all()
     if unread_msgs:
@@ -1029,7 +1020,6 @@ def get_messages(chat_id):
             msg.is_read = True
         db.session.commit()
 
-        # Сигнализируем собеседнику, что мы прочитали сообщения
         partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == chat_id,
                                                   ChatParticipant.user_id != current_user.id).first()
         if partner_cp:
@@ -1045,7 +1035,6 @@ def get_messages(chat_id):
         'is_read': m.is_read
     } for m in messages])
 
-
 # ==========================================
 # АДМИН ПАНЕЛЬ
 # ==========================================
@@ -1059,7 +1048,6 @@ def admin_panel():
 
     users = User.query.order_by(User.id.desc()).all()
     return render_template_string(ADMIN_TEMPLATE, users=users, connected=connected_users)
-
 
 @app.route('/admin/action/<int:target_id>/<action>')
 @login_required
@@ -1082,7 +1070,6 @@ def admin_action(target_id, action):
     db.session.commit()
     return redirect(url_for('admin_panel'))
 
-
 @app.route('/admin/impersonate/<int:target_id>')
 @login_required
 def impersonate(target_id):
@@ -1094,7 +1081,6 @@ def impersonate(target_id):
     login_user(target_user)
     return redirect(url_for('index'))
 
-
 @app.route('/admin/revert')
 @login_required
 def revert_impersonate():
@@ -1103,7 +1089,6 @@ def revert_impersonate():
         admin_user = User.query.get(admin_id)
         if admin_user: login_user(admin_user)
     return redirect(url_for('admin_panel'))
-
 
 # ==========================================
 # SOCKET.IO СЕРВЕРНАЯ ЛОГИКА
@@ -1119,7 +1104,6 @@ def handle_connect():
         db.session.commit()
         emit('status_update', {'user_id': current_user.id, 'status': 'online'}, broadcast=True)
 
-
 @socketio.on('disconnect')
 def handle_disconnect():
     if current_user.is_authenticated:
@@ -1133,7 +1117,6 @@ def handle_disconnect():
             last_time = u.last_seen.strftime('%H:%M')
             emit('status_update', {'user_id': current_user.id, 'status': 'offline', 'last_seen': last_time}, broadcast=True)
 
-
 @socketio.on('typing')
 def handle_typing(data):
     chat_id = data.get('chat_id')
@@ -1141,7 +1124,6 @@ def handle_typing(data):
                                               ChatParticipant.user_id != current_user.id).first()
     if partner_cp:
         emit('typing_status', {'chat_id': chat_id, 'is_typing': True}, room=f"user_{partner_cp.user_id}")
-
 
 @socketio.on('send_message')
 def handle_message(data):
@@ -1160,15 +1142,12 @@ def handle_message(data):
     for p in ChatParticipant.query.filter_by(chat_id=chat_id).all():
         emit('new_message', msg_data, room=f"user_{p.user_id}")
 
-
 # ==========================================
 # ИНИЦИАЛИЗАЦИЯ И ЗАПУСК
 # ==========================================
 def init_db():
     with app.app_context():
-        # УДАЛЕНО УДАЛЕНИЕ БАЗЫ ДАННЫХ - Данные больше не будут стираться!
         db.create_all()
-
         if not User.query.filter_by(username='admin').first():
             admin = User(
                 username='admin', password='admin',
@@ -1180,11 +1159,8 @@ def init_db():
             db.session.commit()
             print(">>> База инициализирована. Создан admin:admin")
 
-# Вызываем функцию инициализации вне блока __main__,
-# чтобы Gunicorn (на Render) выполнил ее при запуске приложения.
 init_db()
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    # Этот блок сработает только при запуске скрипта вручную (python app.py)
     socketio.run(app, host='0.0.0.0', port=port, debug=True)
