@@ -32,12 +32,24 @@ db_url = os.environ.get(
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 
-# ВАЖНО: Подменяем драйвер на чистый Python (pg8000) для идеальной работы с Eventlet
+# ВАЖНО: Убираем sslmode из строки, так как драйвер pg8000 его не понимает
+if "?sslmode=require" in db_url:
+    db_url = db_url.replace("?sslmode=require", "")
+elif "&sslmode=require" in db_url:
+    db_url = db_url.replace("&sslmode=require", "")
+
+# Подменяем драйвер на чистый Python (pg8000) для идеальной работы с Eventlet
 if db_url.startswith("postgresql://"):
     db_url = db_url.replace("postgresql://", "postgresql+pg8000://", 1)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Настраиваем SSL-контекст (Aiven требует защищенного соединения)
+import ssl
+ssl_context = ssl.create_default_context()
+ssl_context.check_hostname = False
+ssl_context.verify_mode = ssl.CERT_NONE
 
 # Настройки для поддержания живого соединения с Aiven (Connection Pooling)
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
@@ -45,7 +57,8 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_recycle': 280,
     'pool_pre_ping': True,
     'pool_timeout': 20,
-    'max_overflow': 15
+    'max_overflow': 15,
+    'connect_args': {'ssl_context': ssl_context}  # Передаем SSL напрямую в драйвер
 }
 
 db = SQLAlchemy(app)
