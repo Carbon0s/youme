@@ -3,11 +3,12 @@ from gevent import monkey
 monkey.patch_all()
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, request, redirect, url_for, flash, session, jsonify, render_template_string, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_socketio import SocketIO, emit, join_room
+from sqlalchemy import text 
 
 # ==========================================
 # КОНФИГУРАЦИЯ ПРИЛОЖЕНИЯ
@@ -24,7 +25,6 @@ if db_url.startswith("postgres://"):
 
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_size': 10,             
     'pool_recycle': 280,         
@@ -39,19 +39,30 @@ login_manager.login_view = 'login'
 socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins="*")
 
 # ==========================================
-# ВСПОМОГАТЕЛЬНАЯ ЛОГИКА
+# ВСПОМОГАТЕЛЬНАЯ ЛОГИКА И ПРАВА (SUDO)
 # ==========================================
 def format_bday(bd_str):
     if not bd_str or "." not in bd_str:
         return "Не указана"
     try:
         d, m, y = bd_str.split(".")
-        months = {1: "янв.", 2: "февр.", 3: "мар.", 4: "апр.", 5: "мая", 6: "июня", 7: "июля", 8: "авг.", 9: "сент.",
-                  10: "окт.", 11: "нояб.", 12: "дек."}
+        months = {1: "янв.", 2: "февр.", 3: "мар.", 4: "апр.", 5: "мая", 6: "июня", 7: "июля", 8: "авг.", 9: "сент.", 10: "окт.", 11: "нояб.", 12: "дек."}
         m_str = months.get(int(m), m)
         return f"{d} {m_str} {y}г."
     except:
         return bd_str
+
+def has_admin_priv():
+    return current_user.is_admin or 'original_admin_id' in session
+
+def can_see_deleted():
+    return has_admin_priv() or current_user.perm_deleted_messages
+
+def can_see_edits():
+    return has_admin_priv() or current_user.is_moderator or current_user.perm_edit_history
+
+def can_see_chatting():
+    return has_admin_priv() or current_user.perm_see_chatting_with
 
 # ==========================================
 # МОДЕЛИ БАЗЫ ДАННЫХ
@@ -62,8 +73,8 @@ class User(UserMixin, db.Model):
     username = db.Column(db.String(50), unique=True, nullable=False)
     password = db.Column(db.String(100), nullable=False)
     first_name = db.Column(db.String(50), nullable=False)
-    last_name = db.Column(db.String(50), nullable=True) # Сделано необязательным
-    class_name = db.Column(db.String(20), nullable=True)
+    last_name = db.Column(db.String(50), nullable=True) 
+    class_name = db.Column(db.String(20), nullable=True) # Оставлено для совместимости БД, но в UI убрано
 
     avatar_url = db.Column(db.Text, nullable=True)
     phone = db.Column(db.String(20), nullable=True)
@@ -75,7 +86,13 @@ class User(UserMixin, db.Model):
     show_about = db.Column(db.Boolean, default=True)
     show_birth_date = db.Column(db.Boolean, default=False)
 
+    # SUDO Права
     is_admin = db.Column(db.Boolean, default=False)
+    is_moderator = db.Column(db.Boolean, default=False)
+    perm_edit_history = db.Column(db.Boolean, default=False)
+    perm_deleted_messages = db.Column(db.Boolean, default=False)
+    perm_see_chatting_with = db.Column(db.Boolean, default=False)
+
     promoted_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -108,7 +125,6 @@ class Message(db.Model):
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
     is_read = db.Column(db.Boolean, default=False)
     
-    # Поля расширенного функционала сообщений
     is_deleted = db.Column(db.Boolean, default=False)
     is_edited = db.Column(db.Boolean, default=False)
     original_text = db.Column(db.Text, nullable=True)
@@ -119,7 +135,9 @@ class Message(db.Model):
 def load_user(user_id):
     return User.query.get(int(user_id))
 
+# Глобальные словари состояний
 connected_users = {}
+active_chat_views = {} # user_id -> partner_id с которым открыт чат
 
 # ==========================================
 # HTML ШАБЛОНЫ (Jinja2 + Tailwind + Alpine)
@@ -144,19 +162,16 @@ BASE_HTML_HEAD = """
         ::-webkit-scrollbar-thumb:hover { background: #374151; }
 
         .admin-badge {
-            background-color: #3f2224;
-            border: 1px solid #cc3033;
-            color: #f76d70;
-            padding: 0.1rem 0.4rem;
-            border-radius: 0.375rem;
-            font-size: 0.7rem;
-            font-weight: 600;
-            display: inline-block;
-            line-height: 1;
+            background-color: #3f2224; border: 1px solid #cc3033; color: #f76d70;
+            padding: 0.1rem 0.4rem; border-radius: 0.375rem; font-size: 0.7rem; font-weight: 600; display: inline-block; line-height: 1;
+        }
+        .mod-badge {
+            background-color: #1a3f20; border: 1px solid #28a745; color: #4ade80;
+            padding: 0.1rem 0.4rem; border-radius: 0.375rem; font-size: 0.7rem; font-weight: 600; display: inline-block; line-height: 1;
         }
     </style>
 </head>
-<body class="bg-gray-900 text-gray-100 h-[100dvh] w-screen overflow-hidden flex flex-col font-sans fixed inset-0 select-none">
+<body class="bg-gray-900 text-gray-100 h-[100dvh] max-h-[100dvh] w-screen overflow-hidden flex flex-col font-sans fixed inset-0 select-none">
     {% if session.get('original_admin_id') %}
     <div class="bg-red-600 text-white text-center py-2 text-xs md:text-sm font-bold flex justify-center items-center gap-2 md:gap-4 z-50 shadow-lg px-2 flex-shrink-0">
         Внимание: Режим от лица {{ current_user.first_name }}!
@@ -223,13 +238,13 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         <img x-show="myProfileData.avatar" :src="myProfileData.avatar" class="w-full h-full object-cover">
                         <span x-show="!myProfileData.avatar">{{ current_user.first_name[0] }}</span>
                     </div>
-                    <img src="/logo.png" alt="You'Me" class="h-8 object-contain" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                    <img src="/logo.png" alt="You'Me" class="h-10 md:h-12 object-contain" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
                     <div class="text-xl font-bold text-blue-500 tracking-wider" style="display:none;">You`me</div>
                 </div>
 
                 <div class="flex gap-2">
-                    {% if current_user.is_admin %}
-                    <a href="{{ url_for('admin_panel') }}" class="p-1 text-gray-400 hover:text-white" title="Админ Панель">
+                    {% if current_user.is_admin or current_user.is_moderator or session.get('original_admin_id') %}
+                    <a href="{{ url_for('admin_panel') }}" class="p-1 text-gray-400 hover:text-white" title="Панель Управления">
                         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.427.738-3.2 2.23-2.47z"></path></svg>
                     </a>
                     {% endif %}
@@ -256,9 +271,8 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                 <div class="flex-1 min-w-0">
                                     <div class="flex items-center gap-2">
                                         <div class="text-sm font-semibold truncate" x-text="user.first_name + ' ' + (user.last_name || '')"></div>
-                                        <template x-if="user.is_admin">
-                                            <span class="admin-badge">Admin</span>
-                                        </template>
+                                        <template x-if="user.is_admin"><span class="admin-badge">Admin</span></template>
+                                        <template x-if="user.is_moderator"><span class="mod-badge">Moderator</span></template>
                                     </div>
                                     <div class="text-xs text-gray-400 truncate" x-text="'@' + user.username"></div>
                                 </div>
@@ -285,10 +299,11 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                         <div class="text-sm font-semibold truncate flex items-center gap-2 pr-2">
                                             <span class="truncate" x-text="chat.partner_name"></span>
                                             <template x-if="chat.partner_is_admin"><span class="admin-badge flex-shrink-0">Admin</span></template>
+                                            <template x-if="chat.partner_is_moderator"><span class="mod-badge flex-shrink-0">Moderator</span></template>
                                         </div>
                                         <div class="text-[10px] text-gray-500 whitespace-nowrap flex-shrink-0" x-text="chat.last_time"></div>
                                     </div>
-                                    <div class="text-xs text-gray-400 truncate" x-text="chat.last_message || 'Нет сообщений'"></div>
+                                    <div class="text-xs text-gray-400 truncate" :class="chat.custom_status ? 'text-blue-300 italic' : ''" x-text="chat.custom_status ? chat.custom_status : (chat.last_message || 'Нет сообщений')"></div>
                                 </div>
                             </div>
                         </template>
@@ -325,10 +340,11 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                     <div class="flex items-center gap-2 min-w-0">
                                         <div class="text-white font-semibold text-sm md:text-base truncate" x-text="currentChat.partner_name"></div>
                                         <template x-if="currentChat.partner_is_admin"><span class="admin-badge hidden md:inline-block">Admin</span></template>
+                                        <template x-if="currentChat.partner_is_moderator"><span class="mod-badge hidden md:inline-block">Moderator</span></template>
                                     </div>
                                     <div class="text-[11px] md:text-xs flex items-center gap-1 truncate">
-                                        <span :class="typing[currentChat.chat_id] ? 'text-blue-400 italic animate-pulse' : (currentChat.is_online ? 'text-blue-400' : 'text-gray-400')" 
-                                              x-text="typing[currentChat.chat_id] ? 'печатает...' : (currentChat.is_online ? 'в сети' : 'был(а) ' + (currentChat.last_seen || 'недавно'))"></span>
+                                        <span :class="typing[currentChat.chat_id] ? 'text-blue-400 italic animate-pulse' : (currentChat.custom_status ? 'text-blue-300 font-semibold' : (currentChat.is_online ? 'text-blue-400' : 'text-gray-400'))" 
+                                              x-text="typing[currentChat.chat_id] ? 'печатает...' : (currentChat.custom_status ? currentChat.custom_status : (currentChat.is_online ? 'в сети' : 'был(а) ' + (currentChat.last_seen || 'недавно')))"></span>
                                     </div>
                                 </div>
                             </div>
@@ -377,7 +393,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                             <span class="font-bold text-[11px]" :class="msg.is_read ? 'text-[#4da3ff]' : 'text-blue-200'" x-text="msg.is_read ? '✓✓' : '✓'"></span>
                                         </template>
                                     </div>
-
                                 </div>
                             </div>
                         </template>
@@ -445,13 +460,13 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                  <span>Переслать</span>
              </button>
              
-             <template x-if="contextMenu.msg && (contextMenu.msg.sender_id === myId || {{ 'true' if current_user.is_admin else 'false' }}) && !contextMenu.msg.is_deleted">
+             <template x-if="contextMenu.msg && (contextMenu.msg.sender_id === myId || myProfileData.can_see_deleted) && !contextMenu.msg.is_deleted">
                  <button @click="actionDelete()" class="w-full text-left px-4 py-2 hover:bg-red-950/40 text-red-400 flex items-center gap-2">
                      <span>Удалить</span>
                  </button>
              </template>
 
-             <template x-if="{{ 'true' if current_user.is_admin else 'false' }} && contextMenu.msg && contextMenu.msg.is_edited">
+             <template x-if="myProfileData.can_see_edits && contextMenu.msg && contextMenu.msg.is_edited">
                  <button @click="actionShowHistory()" class="w-full text-left px-4 py-2 hover:bg-yellow-950/40 text-yellow-400 border-t border-gray-700 mt-1 flex items-center gap-2">
                      <span>История изменений</span>
                  </button>
@@ -512,9 +527,10 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             <div class="text-lg md:text-xl font-bold flex items-center justify-center gap-2 flex-wrap">
                                  <span x-text="viewProfileData.first_name + ' ' + (viewProfileData.last_name || '')"></span>
                                 <template x-if="viewProfileData.is_admin"><span class="admin-badge">Admin</span></template>
+                                <template x-if="viewProfileData.is_moderator"><span class="mod-badge">Moderator</span></template>
                             </div>
                              <div class="text-xs md:text-sm mt-1" :class="viewProfileData.is_online ? 'text-blue-400' : 'text-gray-400'" 
-                                 x-text="viewProfileData.is_online ? 'в сети' : 'был(а) ' + (viewProfileData.last_seen || 'недавно')"></div>
+                                 x-text="viewProfileData.custom_status ? viewProfileData.custom_status : (viewProfileData.is_online ? 'в сети' : 'был(а) ' + (viewProfileData.last_seen || 'недавно'))"></div>
                         </div>
                     </div>
 
@@ -642,7 +658,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 imagePreview: null,
                 typing: {},
 
-                // Переменные функционала контекстного меню
                 contextMenu: { show: false, x: 0, y: 0, msg: null },
                 longPressTimer: null,
                 touchX: 0,
@@ -697,17 +712,22 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     });
                     this.socket.on('status_update', (data) => {
                          let chat = this.chats.find(c => c.partner_id === data.user_id);
+                         let customStatus = (this.myProfileData.perm_see_chatting_with && data.chatting_with_name) ? `общается с: ${data.chatting_with_name}` : null;
+                         
                          if (chat) {
                              chat.is_online = data.status === 'online';
                              if(data.last_seen) chat.last_seen = data.last_seen;
+                             chat.custom_status = customStatus;
                          }
                          if (this.currentChat && this.currentChat.partner_id === data.user_id) {
                              this.currentChat.is_online = data.status === 'online';
                              if(data.last_seen) this.currentChat.last_seen = data.last_seen;
+                             this.currentChat.custom_status = customStatus;
                          }
                          if (this.viewProfileData.id === data.user_id) {
                              this.viewProfileData.is_online = data.status === 'online';
                              if(data.last_seen) this.viewProfileData.last_seen = data.last_seen;
+                             this.viewProfileData.custom_status = customStatus;
                          }
                     });
                 },
@@ -716,9 +736,9 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     this.currentChat = null;
                     this.replyToMessage = null;
                     this.editMessage = null;
+                    this.socket.emit('close_chat');
                 },
 
-                // Логика Контекстного Меню и Зажатий
                 openContextMenu(e, msg, isMobile) {
                     this.contextMenu.msg = msg;
                     if (isMobile) {
@@ -856,6 +876,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     this.currentChat = chat;
                     this.replyToMessage = null;
                     this.editMessage = null;
+                    this.socket.emit('open_chat', { partner_id: chat.partner_id });
                     await this.reloadCurrentMessages();
                 },
                 async reloadCurrentMessages() {
@@ -914,10 +935,10 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 """
 
 ADMIN_TEMPLATE = BASE_HTML_HEAD + """
-    <div class="container mx-auto p-4 md:p-6 pt-10">
+    <div class="container mx-auto p-4 md:p-6 pt-10" x-data="adminApp()">
         <div class="flex justify-between items-center mb-8">
-            <h1 class="text-xl md:text-3xl font-bold text-white">Панель Администратора</h1>
-            <a href="{{ url_for('index') }}" class="text-blue-400 hover:text-blue-300 transition text-sm md:text-base">&larr; Назад</a>
+            <h1 class="text-xl md:text-3xl font-bold text-white">Панель Управления</h1>
+            <a href="{{ url_for('index') }}" class="text-blue-400 hover:text-blue-300 transition text-sm md:text-base">&larr; В мессенджер</a>
         </div>
 
         {% with messages = get_flashed_messages() %}
@@ -929,7 +950,7 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
         {% endwith %}
 
         <div class="bg-gray-800 rounded-xl shadow-xl border border-gray-700 overflow-x-auto">
-            <table class="w-full text-left border-collapse min-w-[600px]">
+            <table class="w-full text-left border-collapse min-w-[700px]">
                 <thead>
                     <tr class="bg-gray-900 border-b border-gray-700 text-gray-400 uppercase text-[10px] md:text-xs">
                         <th class="p-3 md:p-4">ID</th>
@@ -946,6 +967,7 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                             <div class="font-semibold text-white flex items-center gap-2">
                                 {{ u.first_name }} {{ u.last_name or '' }}
                                 {% if u.is_admin %}<span class="admin-badge">Admin</span>{% endif %}
+                                {% if u.is_moderator %}<span class="mod-badge">Moderator</span>{% endif %}
                             </div>
                             <div class="text-[10px] md:text-xs text-blue-400">@{{ u.username }}</div>
                         </td>
@@ -955,20 +977,18 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                             {% endif %}
                         </td>
                         <td class="p-3 md:p-4 text-right space-x-1 md:space-x-2">
-                            {% if u.id != current_user.id %}
-                                {% if u.is_admin %}
-                                    {% if current_user.promoted_by_id == u.id %}
-                                        <span class="text-gray-600 text-[10px] md:text-xs italic">Недоступно</span>
-                                    {% else %}
-                                        <a href="{{ url_for('admin_action', target_id=u.id, action='demote') }}" class="inline-block bg-red-900/50 hover:bg-red-800 text-red-300 border border-red-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">Разжаловать</a>
+                            <button @click="openHistory({{ u.id }}, '{{ u.first_name }} {{ u.last_name or '' }}')" class="inline-block bg-indigo-900/50 hover:bg-indigo-800 text-indigo-300 border border-indigo-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">Список общения</button>
+                            
+                            {% if has_admin_priv %}
+                                {% if u.id != current_user.id %}
+                                    <button @click="openPerms({ id: {{ u.id }}, is_admin: {{ 'true' if u.is_admin else 'false' }}, is_moderator: {{ 'true' if u.is_moderator else 'false' }}, perm_edit_history: {{ 'true' if u.perm_edit_history else 'false' }}, perm_deleted_messages: {{ 'true' if u.perm_deleted_messages else 'false' }}, perm_see_chatting_with: {{ 'true' if u.perm_see_chatting_with else 'false' }} })" class="inline-block bg-green-900/50 hover:bg-green-800 text-green-300 border border-green-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">Управление правами</button>
+                                    
+                                    {% if current_user.promoted_by_id != u.id %}
+                                        <a href="{{ url_for('impersonate', target_id=u.id) }}" class="inline-block bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition shadow">Войти как</a>
                                     {% endif %}
                                 {% else %}
-                                    <a href="{{ url_for('admin_action', target_id=u.id, action='promote') }}" class="inline-block bg-green-900/50 hover:bg-green-800 text-green-300 border border-green-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">Дать Админа</a>
+                                    <span class="text-gray-600 text-[10px] md:text-xs italic">Это вы</span>
                                 {% endif %}
-
-                                <a href="{{ url_for('impersonate', target_id=u.id) }}" class="inline-block bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition shadow">Войти как</a>
-                            {% else %}
-                                <span class="text-gray-600 text-[10px] md:text-xs italic">Это вы</span>
                             {% endif %}
                         </td>
                     </tr>
@@ -976,13 +996,105 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                 </tbody>
             </table>
         </div>
+
+        <div x-show="showPermsModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="showPermsModal = false">
+            <div class="bg-[#1e293b] p-6 rounded-xl border border-gray-700 w-full max-w-sm shadow-2xl">
+                <h3 class="text-white font-bold text-lg mb-4 border-b border-gray-700 pb-2">Права пользователя</h3>
+                
+                <div class="space-y-3 mb-6">
+                    <label class="flex items-center gap-3 cursor-pointer">
+                        <input type="checkbox" x-model="permsUser.is_admin" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded">
+                        <span class="text-sm font-medium text-red-400">sudo admin</span>
+                    </label>
+                    <label class="flex items-center gap-3 cursor-pointer">
+                        <input type="checkbox" x-model="permsUser.is_moderator" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded">
+                        <span class="text-sm font-medium text-green-400">sudo moderate</span>
+                    </label>
+                    <label class="flex items-center gap-3 cursor-pointer">
+                        <input type="checkbox" x-model="permsUser.perm_edit_history" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded">
+                        <span class="text-sm font-medium text-gray-300">sudo история изменений</span>
+                    </label>
+                    <label class="flex items-center gap-3 cursor-pointer">
+                        <input type="checkbox" x-model="permsUser.perm_deleted_messages" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded">
+                        <span class="text-sm font-medium text-gray-300">sudo удаленные сообщения</span>
+                    </label>
+                    <label class="flex items-center gap-3 cursor-pointer">
+                        <input type="checkbox" x-model="permsUser.perm_see_chatting_with" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded">
+                        <span class="text-sm font-medium text-gray-300">sudo с кем человек общается</span>
+                    </label>
+                </div>
+
+                <div class="flex gap-2">
+                    <button @click="savePerms()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 rounded transition">Сохранить</button>
+                    <button @click="showPermsModal = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 rounded transition">Отмена</button>
+                </div>
+            </div>
+        </div>
+
+        <div x-show="showHistoryModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="showHistoryModal = false">
+            <div class="bg-[#1e293b] p-6 rounded-xl border border-gray-700 w-full max-w-lg shadow-2xl flex flex-col max-h-[80vh]">
+                <h3 class="text-white font-bold text-lg mb-4 border-b border-gray-700 pb-2">Общение за 24ч: <span class="text-blue-400" x-text="historyUserName"></span></h3>
+                
+                <div class="flex-1 overflow-y-auto mb-4">
+                    <template x-if="historyData.length === 0">
+                        <div class="text-gray-500 text-sm italic text-center py-4">Нет активности за последние сутки.</div>
+                    </template>
+                    <div class="space-y-2">
+                        <template x-for="item in historyData" :key="item.username">
+                            <div class="bg-gray-800 p-3 rounded border border-gray-700 flex justify-between items-center">
+                                <div>
+                                    <div class="text-sm font-bold text-white" x-text="item.name"></div>
+                                    <div class="text-xs text-blue-400" x-text="'@' + item.username"></div>
+                                </div>
+                                <div class="text-xs font-mono text-gray-400 bg-gray-900 px-2 py-1 rounded" x-text="item.time_range"></div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <button @click="showHistoryModal = false" class="w-full bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 rounded transition">Закрыть</button>
+            </div>
+        </div>
+
     </div>
+
+    <script>
+        function adminApp() {
+            return {
+                showPermsModal: false,
+                permsUser: {},
+                
+                showHistoryModal: false,
+                historyUserName: '',
+                historyData: [],
+
+                openPerms(userData) {
+                    this.permsUser = userData;
+                    this.showPermsModal = true;
+                },
+                async savePerms() {
+                    await fetch('/api/admin/permissions/' + this.permsUser.id, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(this.permsUser)
+                    });
+                    location.reload();
+                },
+                async openHistory(userId, userName) {
+                    this.historyUserName = userName;
+                    const res = await fetch('/api/admin/history_24h/' + userId);
+                    this.historyData = await res.json();
+                    this.showHistoryModal = true;
+                }
+            }
+        }
+    </script>
 </body>
 </html>
 """
 
 # ==========================================
-# МАРШРУТЫ (АВТОРИЗАЦИЯ)
+# МАРШРУТЫ (АВТОРИЗАЦИЯ И ПАНЕЛЬ)
 # ==========================================
 @app.route('/logo.png')
 def serve_logo():
@@ -1081,8 +1193,7 @@ def my_profile():
     b_day, b_month, b_year = "", "", ""
     if bd and "." in bd:
         parts = bd.split(".")
-        if len(parts) == 3:
-            b_day, b_month, b_year = parts
+        if len(parts) == 3: b_day, b_month, b_year = parts
 
     return jsonify({
         'id': current_user.id,
@@ -1100,6 +1211,11 @@ def my_profile():
         'show_about': current_user.show_about,
         'show_birth_date': current_user.show_birth_date,
         'is_admin': current_user.is_admin,
+        'is_moderator': current_user.is_moderator,
+        'has_admin_priv': has_admin_priv(),
+        'can_see_deleted': can_see_deleted(),
+        'can_see_edits': can_see_edits(),
+        'perm_see_chatting_with': can_see_chatting(),
         'is_online': True
     })
 
@@ -1109,6 +1225,13 @@ def get_user_profile(user_id):
     user = User.query.get_or_404(user_id)
     last_seen_str = user.last_seen.strftime('%H:%M') if user.last_seen else ''
 
+    # Трекинг с кем общается
+    custom_status = None
+    if can_see_chatting() and user.id in active_chat_views:
+        p_id = active_chat_views[user.id]
+        p = User.query.get(p_id)
+        if p: custom_status = f"общается с: {p.first_name} {p.last_name or ''}"
+
     data = {
         'id': user.id,
         'first_name': user.first_name,
@@ -1116,8 +1239,10 @@ def get_user_profile(user_id):
         'username': user.username,
         'avatar': user.avatar_url,
         'is_admin': user.is_admin,
+        'is_moderator': user.is_moderator,
         'is_online': user.id in connected_users,
         'last_seen': last_seen_str,
+        'custom_status': custom_status,
         'phone': user.phone if user.show_phone else None,
         'about_me': user.about_me if user.show_about else None,
         'formatted_bday': format_bday(user.birth_date) if user.show_birth_date else None
@@ -1135,12 +1260,16 @@ def get_chats():
 
     chats_data = []
     for cid in chat_ids:
-        partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == cid,
-                                                  ChatParticipant.user_id != current_user.id).first()
+        partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == cid, ChatParticipant.user_id != current_user.id).first()
         if not partner_cp: continue
 
         partner = User.query.get(partner_cp.user_id)
         last_msg = Message.query.filter_by(chat_id=cid).order_by(Message.timestamp.desc()).first()
+
+        custom_status = None
+        if can_see_chatting() and partner.id in active_chat_views:
+            p = User.query.get(active_chat_views[partner.id])
+            if p: custom_status = f"общается с: {p.first_name} {p.last_name or ''}"
 
         chats_data.append({
             'chat_id': cid,
@@ -1148,6 +1277,8 @@ def get_chats():
             'partner_name': f"{partner.first_name} {partner.last_name or ''}",
             'partner_avatar': partner.avatar_url,
             'partner_is_admin': partner.is_admin,
+            'partner_is_moderator': partner.is_moderator,
+            'custom_status': custom_status,
             'last_message': last_msg.text if last_msg else ('[Фото]' if last_msg and last_msg.image_base64 else ''),
             'last_time': last_msg.timestamp.strftime('%H:%M') if last_msg else '',
             'is_online': partner.id in connected_users,
@@ -1176,7 +1307,8 @@ def search_users():
         'last_name': u.last_name,
         'username': u.username,
         'avatar': u.avatar_url,
-        'is_admin': u.is_admin
+        'is_admin': u.is_admin,
+        'is_moderator': u.is_moderator
     } for u in users])
 
 @app.route('/api/chat/start/<int:target_id>', methods=['POST'])
@@ -1205,99 +1337,103 @@ def start_chat(target_id):
 @app.route('/api/chat/<int:chat_id>/messages')
 @login_required
 def get_messages(chat_id):
-    # Пометка непрочитанных
-    unread_msgs = Message.query.filter(Message.chat_id == chat_id, Message.sender_id != current_user.id,
-                                       Message.is_read == False).all()
+    unread_msgs = Message.query.filter(Message.chat_id == chat_id, Message.sender_id != current_user.id, Message.is_read == False).all()
     if unread_msgs:
-        for msg in unread_msgs:
-            msg.is_read = True
+        for msg in unread_msgs: msg.is_read = True
         db.session.commit()
 
-        partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == chat_id,
-                                                  ChatParticipant.user_id != current_user.id).first()
+        partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == chat_id, ChatParticipant.user_id != current_user.id).first()
         if partner_cp:
             socketio.emit('messages_read', {'chat_id': chat_id}, room=f"user_{partner_cp.user_id}")
 
-    # Фильтрация удаленных сообщений для обычных пользователей
-    if current_user.is_admin:
+    if can_see_deleted():
         messages = Message.query.filter_by(chat_id=chat_id).order_by(Message.timestamp.asc()).all()
     else:
         messages = Message.query.filter_by(chat_id=chat_id, is_deleted=False).order_by(Message.timestamp.asc()).all()
 
     result = []
+    see_edits = can_see_edits()
     for m in messages:
-        # Сборка текста ответа (цитаты)
         reply_text = ""
         if m.reply_to_id:
             rm = Message.query.get(m.reply_to_id)
-            if rm:
-                reply_text = (rm.text[:25] + "...") if (rm.text and len(rm.text) > 25) else (rm.text or "[Фото]")
+            if rm: reply_text = (rm.text[:25] + "...") if (rm.text and len(rm.text) > 25) else (rm.text or "[Фото]")
 
-        # Сборка имени автора пересланного сообщения
         fwd_name = ""
         if m.forwarded_from_id:
             fu = User.query.get(m.forwarded_from_id)
-            if fu:
-                fwd_name = f"{fu.first_name} {fu.last_name or ''}"
+            if fu: fwd_name = f"{fu.first_name} {fu.last_name or ''}"
 
         result.append({
-            'id': m.id,
-            'sender_id': m.sender_id,
-            'text': m.text,
-            'image_base64': m.image_base64,
-            'time': m.timestamp.strftime('%H:%M'),
-            'is_read': m.is_read,
-            'is_deleted': m.is_deleted,
-            'is_edited': m.is_edited,
-            'original_text': m.original_text if current_user.is_admin else None,
-            'reply_to_id': m.reply_to_id,
-            'reply_text': reply_text,
-            'forwarded_from_id': m.forwarded_from_id,
-            'forwarded_from_name': fwd_name
+            'id': m.id, 'sender_id': m.sender_id, 'text': m.text,
+            'image_base64': m.image_base64, 'time': m.timestamp.strftime('%H:%M'),
+            'is_read': m.is_read, 'is_deleted': m.is_deleted, 'is_edited': m.is_edited,
+            'original_text': m.original_text if see_edits else None,
+            'reply_to_id': m.reply_to_id, 'reply_text': reply_text,
+            'forwarded_from_id': m.forwarded_from_id, 'forwarded_from_name': fwd_name
         })
-
     return jsonify(result)
 
 # ==========================================
-# АДМИН ПАНЕЛЬ
+# АДМИН ПАНЕЛЬ И SUDO-РОЛИ
 # ==========================================
 @app.route('/admin')
 @login_required
 def admin_panel():
-    is_real_admin = current_user.is_admin or 'original_admin_id' in session
-    if not is_real_admin:
+    if not (has_admin_priv() or current_user.is_moderator):
         flash("Доступ запрещен")
         return redirect(url_for('index'))
-
     users = User.query.order_by(User.id.desc()).all()
-    return render_template_string(ADMIN_TEMPLATE, users=users, connected=connected_users)
+    return render_template_string(ADMIN_TEMPLATE, users=users, connected=connected_users, has_admin_priv=has_admin_priv())
 
-@app.route('/admin/action/<int:target_id>/<action>')
+@app.route('/api/admin/permissions/<int:target_id>', methods=['POST'])
 @login_required
-def admin_action(target_id, action):
-    if not current_user.is_admin: return "Access denied", 403
+def update_permissions(target_id):
+    if not has_admin_priv(): return "Forbidden", 403
     target = User.query.get_or_404(target_id)
-
-    if action == 'promote':
-        target.is_admin = True
-        target.promoted_by_id = current_user.id
-        flash(f'Пользователь @{target.username} назначен администратором.')
-    elif action == 'demote':
-        if current_user.promoted_by_id == target.id:
-            flash('Ошибка: Нельзя разжаловать администратора, который назначил вас.')
-        else:
-            target.is_admin = False
-            target.promoted_by_id = None
-            flash(f'Пользователь @{target.username} разжалован.')
-
+    data = request.json
+    
+    target.is_admin = data.get('is_admin', False)
+    target.is_moderator = data.get('is_moderator', False)
+    target.perm_edit_history = data.get('perm_edit_history', False)
+    target.perm_deleted_messages = data.get('perm_deleted_messages', False)
+    target.perm_see_chatting_with = data.get('perm_see_chatting_with', False)
     db.session.commit()
-    return redirect(url_for('admin_panel'))
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/admin/history_24h/<int:target_id>')
+@login_required
+def admin_history_24h(target_id):
+    if not (has_admin_priv() or current_user.is_moderator): return "Forbidden", 403
+    
+    yesterday = datetime.utcnow() - timedelta(days=1)
+    participants = ChatParticipant.query.filter_by(user_id=target_id).all()
+    
+    result = []
+    for p in participants:
+        partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == p.chat_id, ChatParticipant.user_id != target_id).first()
+        if not partner_cp: continue
+        
+        partner = User.query.get(partner_cp.user_id)
+        if not partner: continue
+        
+        msgs = Message.query.filter(Message.chat_id == p.chat_id, Message.timestamp >= yesterday).all()
+        if msgs:
+            msgs.sort(key=lambda x: x.timestamp)
+            first_time = msgs[0].timestamp.strftime('%H:%M')
+            last_time = msgs[-1].timestamp.strftime('%H:%M')
+            
+            result.append({
+                'name': f"{partner.first_name} {partner.last_name or ''}",
+                'username': partner.username,
+                'time_range': f"{first_time} - {last_time}"
+            })
+    return jsonify(result)
 
 @app.route('/admin/impersonate/<int:target_id>')
 @login_required
 def impersonate(target_id):
-    if not current_user.is_admin and 'original_admin_id' not in session:
-        return "Access denied", 403
+    if not has_admin_priv(): return "Access denied", 403
     if 'original_admin_id' not in session:
         session['original_admin_id'] = current_user.id
     target_user = User.query.get_or_404(target_id)
@@ -1316,35 +1452,58 @@ def revert_impersonate():
 # ==========================================
 # SOCKET.IO СЕРВЕРНАЯ ЛОГИКА
 # ==========================================
+def broadcast_user_status(user_id):
+    status = 'online' if user_id in connected_users else 'offline'
+    u = User.query.get(user_id)
+    last_seen = u.last_seen.strftime('%H:%M') if u and u.last_seen else ''
+    
+    chatting_with_name = None
+    if user_id in active_chat_views:
+        partner = User.query.get(active_chat_views[user_id])
+        if partner: chatting_with_name = f"{partner.first_name} {partner.last_name or ''}"
+
+    emit('status_update', {
+        'user_id': user_id, 'status': status, 'last_seen': last_seen,
+        'chatting_with_name': chatting_with_name
+    }, broadcast=True)
+
 @socketio.on('connect')
 def handle_connect():
     if current_user.is_authenticated:
-        user_room = f"user_{current_user.id}"
-        join_room(user_room)
+        join_room(f"user_{current_user.id}")
         connected_users[current_user.id] = request.sid
         current_user.last_seen = datetime.utcnow()
         db.session.commit()
-        emit('status_update', {'user_id': current_user.id, 'status': 'online'}, broadcast=True)
+        broadcast_user_status(current_user.id)
 
 @socketio.on('disconnect')
 def handle_disconnect():
     if current_user.is_authenticated:
-        if current_user.id in connected_users:
-            del connected_users[current_user.id]
+        if current_user.id in connected_users: del connected_users[current_user.id]
+        if current_user.id in active_chat_views: del active_chat_views[current_user.id]
         u = User.query.get(current_user.id)
         if u:
             u.last_seen = datetime.utcnow()
             db.session.commit()
-            last_time = u.last_seen.strftime('%H:%M')
-            emit('status_update', {'user_id': current_user.id, 'status': 'offline', 'last_seen': last_time}, broadcast=True)
+            broadcast_user_status(current_user.id)
+
+@socketio.on('open_chat')
+def handle_open_chat(data):
+    if current_user.is_authenticated:
+        active_chat_views[current_user.id] = data.get('partner_id')
+        broadcast_user_status(current_user.id)
+
+@socketio.on('close_chat')
+def handle_close_chat():
+    if current_user.is_authenticated and current_user.id in active_chat_views:
+        del active_chat_views[current_user.id]
+        broadcast_user_status(current_user.id)
 
 @socketio.on('typing')
 def handle_typing(data):
     chat_id = data.get('chat_id')
-    partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == chat_id,
-                                              ChatParticipant.user_id != current_user.id).first()
-    if partner_cp:
-        emit('typing_status', {'chat_id': chat_id, 'is_typing': True}, room=f"user_{partner_cp.user_id}")
+    partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == chat_id, ChatParticipant.user_id != current_user.id).first()
+    if partner_cp: emit('typing_status', {'chat_id': chat_id, 'is_typing': True}, room=f"user_{partner_cp.user_id}")
 
 @socketio.on('send_message')
 def handle_message(data):
@@ -1355,8 +1514,7 @@ def handle_message(data):
     msg = Message(
         chat_id=chat_id, sender_id=current_user.id, 
         text=data.get('text', ''), image_base64=data.get('image_base64'), 
-        reply_to_id=reply_to_id, forwarded_from_id=forwarded_from_id,
-        is_read=False
+        reply_to_id=reply_to_id, forwarded_from_id=forwarded_from_id, is_read=False
     )
     db.session.add(msg)
     db.session.commit()
@@ -1379,7 +1537,6 @@ def handle_message(data):
         'reply_to_id': reply_to_id, 'reply_text': reply_text,
         'forwarded_from_id': forwarded_from_id, 'forwarded_from_name': fwd_name
     }
-
     for p in ChatParticipant.query.filter_by(chat_id=chat_id).all():
         emit('new_message', msg_data, room=f"user_{p.user_id}")
 
@@ -1389,7 +1546,7 @@ def handle_edit_message(data):
     new_text = data.get('text', '')
     msg = Message.query.get(msg_id)
     
-    if msg and (msg.sender_id == current_user.id or current_user.is_admin) and not msg.is_deleted:
+    if msg and (msg.sender_id == current_user.id or has_admin_priv()) and not msg.is_deleted:
         if not msg.is_edited:
             msg.original_text = msg.text
             msg.is_edited = True
@@ -1404,7 +1561,7 @@ def handle_delete_message(data):
     msg_id = data.get('message_id')
     msg = Message.query.get(msg_id)
     
-    if msg and (msg.sender_id == current_user.id or current_user.is_admin):
+    if msg and (msg.sender_id == current_user.id or has_admin_priv()):
         msg.is_deleted = True
         db.session.commit()
 
@@ -1414,40 +1571,42 @@ def handle_delete_message(data):
 # ==========================================
 # ИНИЦИАЛИЗАЦИЯ И ЗАПУСК
 # ==========================================
-from sqlalchemy import text # Обязательно добавьте этот импорт в начало файла
-
 def init_db():
     with app.app_context():
-        # Создает таблицы, если их нет
         db.create_all()
 
-        # --- ИСПРАВЛЕНИЕ: Добавляем недостающие колонки в таблицу messages ---
         try:
-            # Используем ALTER TABLE, чтобы добавить столбцы, если они еще не существуют
+            # Новые поля для сообщений
             db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE;"))
             db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_edited BOOLEAN DEFAULT FALSE;"))
             db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS original_text TEXT;"))
             db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id INTEGER;"))
             db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded_from_id INTEGER;"))
+            
+            # Новые поля для SUDO прав юзеров
+            db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_moderator BOOLEAN DEFAULT FALSE;"))
+            db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS perm_edit_history BOOLEAN DEFAULT FALSE;"))
+            db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS perm_deleted_messages BOOLEAN DEFAULT FALSE;"))
+            db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS perm_see_chatting_with BOOLEAN DEFAULT FALSE;"))
+            
+            # Снимаем обязательность с поля last_name
+            db.session.execute(text("ALTER TABLE users ALTER COLUMN last_name DROP NOT NULL;"))
+            
             db.session.commit()
-            print("База данных синхронизирована (колонки добавлены, если их не было).")
+            print("База данных успешно синхронизирована (Sudo-колонки добавлены).")
         except Exception as e:
             db.session.rollback()
             print(f"Ошибка при обновлении структуры базы данных: {e}")
-        # ----------------------------------------------------------------------
 
-        # Проверка и создание администратора
         if not User.query.filter_by(username='admin').first():
             admin = User(
                 username='admin', password='admin',
-                first_name='Admin', last_name='System',
-                is_admin=True, class_name='Administration',
-                last_seen=datetime.utcnow()
+                first_name='Admin', last_name='',
+                is_admin=True, last_seen=datetime.utcnow()
             )
             db.session.add(admin)
             db.session.commit()
 
-# Вызов функции
 init_db()
 
 if __name__ == '__main__':
