@@ -29,8 +29,8 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 # ОПТИМИЗАЦИЯ ПУЛА СОЕДИНЕНИЙ (УБИРАЕТ ЗАДЕРЖКИ ПРИ ОТКРЫТИИ СТРАНИЦ)
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_size': 10,             
-    'pool_recycle': 280,         # Предотвращает разрыв соединения со стороны Aiven
-    'pool_pre_ping': True,       # Проверяет соединение перед запросом (убирает зависания)
+    'pool_recycle': 280,         
+    'pool_pre_ping': True,       
     'pool_timeout': 20,          
 }
 
@@ -128,7 +128,7 @@ BASE_HTML_HEAD = """
 <html lang="ru" class="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>You`me</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -155,18 +155,18 @@ BASE_HTML_HEAD = """
         }
     </style>
 </head>
-<body class="bg-gray-900 text-gray-100 h-screen overflow-hidden flex flex-col font-sans">
+<body class="bg-gray-900 text-gray-100 h-screen w-screen overflow-hidden flex flex-col font-sans fixed inset-0">
     {% if session.get('original_admin_id') %}
-    <div class="bg-red-600 text-white text-center py-2 text-sm font-bold flex justify-center items-center gap-4 z-50 shadow-lg">
-        Внимание: Режим от лица {{ current_user.first_name }} {{ current_user.last_name }}!
-        <a href="{{ url_for('revert_impersonate') }}" class="bg-white text-red-600 px-3 py-1 rounded-md hover:bg-gray-200 transition">Вернуться</a>
+    <div class="bg-red-600 text-white text-center py-2 text-xs md:text-sm font-bold flex justify-center items-center gap-2 md:gap-4 z-50 shadow-lg px-2">
+        Внимание: Режим от лица {{ current_user.first_name }}!
+        <a href="{{ url_for('revert_impersonate') }}" class="bg-white text-red-600 px-2 py-1 rounded-md hover:bg-gray-200 transition">Вернуться</a>
     </div>
     {% endif %}
 """
 
 LOGIN_TEMPLATE = BASE_HTML_HEAD + """
     <div class="flex-1 flex items-center justify-center bg-gray-900 px-4" x-data="{ isLogin: true }">
-        <div class="bg-gray-800 p-8 rounded-xl shadow-2xl w-full max-w-md border border-gray-700">
+        <div class="bg-gray-800 p-6 md:p-8 rounded-xl shadow-2xl w-full max-w-md border border-gray-700">
             <h1 class="text-3xl font-bold text-center text-blue-500 mb-6 font-serif tracking-widest">You`me</h1>
 
             {% with messages = get_flashed_messages() %}
@@ -180,31 +180,31 @@ LOGIN_TEMPLATE = BASE_HTML_HEAD + """
             <form x-show="isLogin" action="{{ url_for('login') }}" method="POST" class="space-y-4">
                 <input type="hidden" name="action" value="login">
                 <div>
-                    <input type="text" name="username" placeholder="Логин (@username)" required class="w-full bg-gray-700 border border-gray-600 rounded p-2 text-white focus:outline-none focus:border-blue-500">
+                    <input type="text" name="username" placeholder="Логин (@username)" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
                 </div>
                 <div>
-                    <input type="password" name="password" placeholder="Пароль" required class="w-full bg-gray-700 border border-gray-600 rounded p-2 text-white focus:outline-none focus:border-blue-500">
+                    <input type="password" name="password" placeholder="Пароль" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
                 </div>
-                <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded transition">Войти</button>
+                <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 md:py-2 rounded transition">Войти</button>
                 <p class="text-center text-sm text-gray-400 mt-4">Нет аккаунта? <a href="#" @click.prevent="isLogin = false" class="text-blue-400 hover:underline">Регистрация</a></p>
             </form>
 
             <form x-show="!isLogin" action="{{ url_for('login') }}" method="POST" class="space-y-4" style="display: none;">
                 <input type="hidden" name="action" value="register">
                 <div>
-                    <input type="text" name="username" placeholder="Придумайте логин (только латиница)" required class="w-full bg-gray-700 border border-gray-600 rounded p-2 text-white focus:outline-none focus:border-blue-500">
+                    <input type="text" name="username" placeholder="Придумайте логин (только латиница)" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
                 </div>
                 <div>
-                    <input type="password" name="password" placeholder="Пароль" required class="w-full bg-gray-700 border border-gray-600 rounded p-2 text-white focus:outline-none focus:border-blue-500">
+                    <input type="password" name="password" placeholder="Пароль" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
                 </div>
                 <div class="flex gap-2">
-                    <input type="text" name="first_name" placeholder="Имя" required class="w-1/2 bg-gray-700 border border-gray-600 rounded p-2 text-white focus:outline-none focus:border-blue-500">
-                    <input type="text" name="last_name" placeholder="Фамилия" required class="w-1/2 bg-gray-700 border border-gray-600 rounded p-2 text-white focus:outline-none focus:border-blue-500">
+                    <input type="text" name="first_name" placeholder="Имя" required class="w-1/2 bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
+                    <input type="text" name="last_name" placeholder="Фамилия" required class="w-1/2 bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
                 </div>
                 <div>
-                    <input type="text" name="class_name" placeholder="Класс (напр. 10А)" class="w-full bg-gray-700 border border-gray-600 rounded p-2 text-white focus:outline-none focus:border-blue-500">
+                    <input type="text" name="class_name" placeholder="Класс (напр. 10А)" class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
                 </div>
-                <button type="submit" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 rounded transition">Зарегистрироваться</button>
+                <button type="submit" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 md:py-2 rounded transition">Зарегистрироваться</button>
                 <p class="text-center text-sm text-gray-400 mt-4">Уже есть аккаунт? <a href="#" @click.prevent="isLogin = true" class="text-blue-400 hover:underline">Войти</a></p>
             </form>
         </div>
@@ -214,9 +214,11 @@ LOGIN_TEMPLATE = BASE_HTML_HEAD + """
 """
 
 APP_TEMPLATE = BASE_HTML_HEAD + """
-    <div class="flex-1 flex overflow-hidden" x-data="messengerApp()">
+    <div class="flex-1 flex overflow-hidden w-full h-full" x-data="messengerApp()">
 
-        <div class="w-80 bg-gray-900 border-r border-gray-800 flex flex-col flex-shrink-0">
+        <div class="bg-gray-900 border-r border-gray-800 flex-col flex-shrink-0 w-full md:w-80 h-full"
+             :class="currentChat ? 'hidden md:flex' : 'flex'">
+             
             <div class="p-4 border-b border-gray-800 flex justify-between items-center relative">
                 <div class="flex items-center gap-3">
                     <div @click="openMyProfile()" class="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold cursor-pointer overflow-hidden shadow-md hover:ring-2 hover:ring-blue-400 transition">
@@ -229,11 +231,11 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
                 <div class="flex gap-2">
                     {% if current_user.is_admin %}
-                    <a href="{{ url_for('admin_panel') }}" class="text-gray-400 hover:text-white" title="Админ Панель">
+                    <a href="{{ url_for('admin_panel') }}" class="p-1 text-gray-400 hover:text-white" title="Админ Панель">
                         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
                     </a>
                     {% endif %}
-                    <a href="{{ url_for('logout') }}" class="text-gray-400 hover:text-red-500" title="Выйти">
+                    <a href="{{ url_for('logout') }}" class="p-1 text-gray-400 hover:text-red-500" title="Выйти">
                         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
                     </a>
                 </div>
@@ -249,7 +251,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         <div class="px-4 py-2 text-xs font-semibold text-gray-500 uppercase">Результаты</div>
                         <template x-for="user in searchResults" :key="user.id">
                             <div @click="startChat(user.id)" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 cursor-pointer transition">
-                                <div class="w-10 h-10 rounded-full bg-gradient-to-tr from-blue-500 to-purple-600 flex items-center justify-center text-white font-bold overflow-hidden">
+                                <div class="w-10 h-10 rounded-full bg-gradient-to-tr from-blue-500 to-purple-600 flex items-center justify-center text-white font-bold overflow-hidden flex-shrink-0">
                                     <img x-show="user.avatar" :src="user.avatar" class="w-full h-full object-cover">
                                     <span x-show="!user.avatar" x-text="user.first_name[0]"></span>
                                 </div>
@@ -282,11 +284,11 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
                                 <div class="flex-1 min-w-0">
                                     <div class="flex justify-between items-center mb-1">
-                                        <div class="text-sm font-semibold truncate flex items-center gap-2">
-                                            <span x-text="chat.partner_name"></span>
-                                            <template x-if="chat.partner_is_admin"><span class="admin-badge">Admin</span></template>
+                                        <div class="text-sm font-semibold truncate flex items-center gap-2 pr-2">
+                                            <span class="truncate" x-text="chat.partner_name"></span>
+                                            <template x-if="chat.partner_is_admin"><span class="admin-badge flex-shrink-0">Admin</span></template>
                                         </div>
-                                        <div class="text-xs text-gray-500" x-text="chat.last_time"></div>
+                                        <div class="text-[10px] text-gray-500 whitespace-nowrap flex-shrink-0" x-text="chat.last_time"></div>
                                     </div>
                                     <div class="text-xs text-gray-400 truncate" x-text="chat.last_message || 'Нет сообщений'"></div>
                                 </div>
@@ -297,46 +299,55 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         </div>
 
-        <div class="flex-1 bg-[#0f172a] bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] flex flex-col relative" style="background-blend-mode: overlay;">
+        <div class="flex-1 flex-col relative bg-[#0f172a] bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] h-full w-full" 
+             style="background-blend-mode: overlay;"
+             :class="currentChat ? 'flex' : 'hidden md:flex'">
 
             <template x-if="!currentChat">
                 <div class="flex-1 flex items-center justify-center text-gray-500">
-                    <div class="bg-gray-900/60 px-4 py-2 rounded-full backdrop-blur-sm">Выберите чат для начала общения</div>
+                    <div class="bg-gray-900/60 px-4 py-2 rounded-full backdrop-blur-sm text-sm md:text-base">Выберите чат для начала общения</div>
                 </div>
             </template>
 
             <template x-if="currentChat">
-                <div class="flex-1 flex flex-col h-full">
-                    <div class="h-16 px-6 bg-gray-900/95 backdrop-blur-md border-b border-gray-800 flex items-center justify-between shadow-sm z-10 cursor-pointer" @click="openUserProfile(currentChat.partner_id)">
-                        <div class="flex items-center gap-4">
-                            <div class="flex flex-col">
-                                <div class="flex items-center gap-2">
-                                    <div class="text-white font-semibold" x-text="currentChat.partner_name"></div>
-                                    <template x-if="currentChat.partner_is_admin"><span class="admin-badge">Admin</span></template>
+                <div class="flex-1 flex flex-col h-full w-full">
+                    
+                    <div class="h-16 px-3 md:px-6 bg-gray-900/95 backdrop-blur-md border-b border-gray-800 flex items-center justify-between shadow-sm z-10">
+                        <div class="flex items-center gap-2 md:gap-4 min-w-0">
+                            <button @click="closeChat()" class="md:hidden p-2 -ml-2 text-gray-400 hover:text-white transition flex-shrink-0">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
+                            </button>
+                            
+                            <div class="flex items-center gap-3 cursor-pointer min-w-0" @click="openUserProfile(currentChat.partner_id)">
+                                <div class="w-10 h-10 rounded-full overflow-hidden bg-gray-700 flex items-center justify-center text-white flex-shrink-0">
+                                     <img x-show="currentChat.partner_avatar" :src="currentChat.partner_avatar" class="w-full h-full object-cover">
+                                     <span x-show="!currentChat.partner_avatar" x-text="currentChat.partner_name[0]"></span>
                                 </div>
-                                <div class="text-xs flex items-center gap-1">
-                                    <span :class="typing[currentChat.chat_id] ? 'text-blue-400 italic animate-pulse' : (currentChat.is_online ? 'text-blue-400' : 'text-gray-400')" 
-                                          x-text="typing[currentChat.chat_id] ? 'печатает...' : (currentChat.is_online ? 'в сети' : 'был(а) ' + (currentChat.last_seen || 'недавно'))"></span>
+                                <div class="flex flex-col min-w-0">
+                                    <div class="flex items-center gap-2 min-w-0">
+                                        <div class="text-white font-semibold text-sm md:text-base truncate" x-text="currentChat.partner_name"></div>
+                                        <template x-if="currentChat.partner_is_admin"><span class="admin-badge hidden md:inline-block">Admin</span></template>
+                                    </div>
+                                    <div class="text-[11px] md:text-xs flex items-center gap-1 truncate">
+                                        <span :class="typing[currentChat.chat_id] ? 'text-blue-400 italic animate-pulse' : (currentChat.is_online ? 'text-blue-400' : 'text-gray-400')" 
+                                              x-text="typing[currentChat.chat_id] ? 'печатает...' : (currentChat.is_online ? 'в сети' : 'был(а) ' + (currentChat.last_seen || 'недавно'))"></span>
+                                    </div>
                                 </div>
                             </div>
                         </div>
-                        <div class="w-10 h-10 rounded-full overflow-hidden bg-gray-700 flex items-center justify-center text-white">
-                             <img x-show="currentChat.partner_avatar" :src="currentChat.partner_avatar" class="w-full h-full object-cover">
-                             <span x-show="!currentChat.partner_avatar" x-text="currentChat.partner_name[0]"></span>
-                        </div>
                     </div>
 
-                    <div class="flex-1 overflow-y-auto p-6 space-y-4" id="messagesBox">
+                    <div class="flex-1 overflow-y-auto p-4 md:p-6 space-y-4" id="messagesBox">
                         <template x-for="msg in messages" :key="msg.id">
                             <div class="flex" :class="msg.sender_id === {{ current_user.id }} ? 'justify-end' : 'justify-start'">
-                                <div class="max-w-[70%] rounded-2xl px-4 py-2 shadow-md relative group"
+                                <div class="max-w-[85%] md:max-w-[70%] rounded-2xl px-3 py-2 md:px-4 shadow-md relative group"
                                      :class="msg.sender_id === {{ current_user.id }} ? 'bg-blue-600 text-white rounded-tr-sm' : 'bg-gray-800 text-gray-100 rounded-tl-sm'">
 
                                     <template x-if="msg.image_base64">
                                         <img :src="msg.image_base64" class="rounded-lg mb-2 max-w-full h-auto cursor-pointer">
                                     </template>
 
-                                    <div class="text-[15px] leading-relaxed break-words" x-text="msg.text"></div>
+                                    <div class="text-[14px] md:text-[15px] leading-relaxed break-words" x-text="msg.text"></div>
 
                                     <div class="text-[10px] text-right mt-1 flex items-center justify-end gap-1 opacity-70" :class="msg.sender_id === {{ current_user.id }} ? 'text-blue-200' : 'text-gray-400'">
                                         <span x-text="msg.time"></span>
@@ -350,22 +361,22 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         </template>
                     </div>
 
-                    <div class="bg-gray-900 p-4 border-t border-gray-800">
+                    <div class="bg-gray-900 p-2 md:p-4 border-t border-gray-800 w-full">
                         <div x-show="imagePreview" class="mb-3 relative inline-block">
-                            <img :src="imagePreview" class="h-20 rounded-lg border border-gray-600">
+                            <img :src="imagePreview" class="h-16 md:h-20 rounded-lg border border-gray-600">
                             <button @click="imagePreview = null" class="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs shadow">x</button>
                         </div>
 
-                        <div class="flex items-center gap-3 max-w-4xl mx-auto">
-                            <label class="cursor-pointer text-gray-400 hover:text-blue-500 transition">
+                        <div class="flex items-center gap-2 md:gap-3 w-full max-w-4xl mx-auto">
+                            <label class="cursor-pointer p-2 text-gray-400 hover:text-blue-500 transition flex-shrink-0">
                                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
                                 <input type="file" class="hidden" accept="image/*" @change="handleImageSelect">
                             </label>
 
-                            <input type="text" x-model="newMessage" @keydown.enter="sendMessage()" @input="sendTyping()" placeholder="Написать сообщение..." class="flex-1 bg-gray-800 text-white rounded-full px-5 py-3 focus:outline-none focus:ring-1 focus:ring-blue-500 shadow-inner">
+                            <input type="text" x-model="newMessage" @keydown.enter="sendMessage()" @input="sendTyping()" placeholder="Сообщение..." class="flex-1 min-w-0 bg-gray-800 text-sm md:text-base text-white rounded-full px-4 py-2 md:py-3 focus:outline-none focus:ring-1 focus:ring-blue-500 shadow-inner">
 
-                            <button @click="sendMessage()" class="bg-blue-600 hover:bg-blue-500 text-white rounded-full w-12 h-12 flex items-center justify-center transition shadow-lg" :disabled="!newMessage.trim() && !imagePreview">
-                                <svg class="w-5 h-5 ml-1 transform -rotate-45" fill="currentColor" viewBox="0 0 20 20"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"></path></svg>
+                            <button @click="sendMessage()" class="flex-shrink-0 bg-blue-600 hover:bg-blue-500 text-white rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center transition shadow-lg" :disabled="!newMessage.trim() && !imagePreview">
+                                <svg class="w-4 h-4 md:w-5 md:h-5 ml-1 transform -rotate-45" fill="currentColor" viewBox="0 0 20 20"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"></path></svg>
                             </button>
                         </div>
                     </div>
@@ -373,7 +384,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </template>
         </div>
 
-        <div x-show="showProfileModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" @click.self="closeProfileModal()">
+        <div x-show="showProfileModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" @click.self="closeProfileModal()">
             <div class="bg-[#242f3d] w-full max-w-sm rounded-lg shadow-2xl overflow-hidden flex flex-col relative text-gray-100 animate-fade-in-up">
 
                 <div class="absolute top-4 right-4 flex gap-4 z-20">
@@ -387,16 +398,16 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
                 <div x-show="!editMode" class="flex flex-col">
                     <div class="relative pb-6 bg-gradient-to-b from-[#1c242f] to-[#242f3d]">
-                        <div class="w-32 h-32 mx-auto mt-8 rounded-full bg-blue-600 flex items-center justify-center text-4xl font-bold shadow-lg overflow-hidden border-2 border-transparent">
+                        <div class="w-24 h-24 md:w-32 md:h-32 mx-auto mt-8 rounded-full bg-blue-600 flex items-center justify-center text-4xl font-bold shadow-lg overflow-hidden border-2 border-transparent">
                             <img x-show="viewProfileData.avatar" :src="viewProfileData.avatar" class="w-full h-full object-cover">
                             <span x-show="!viewProfileData.avatar" x-text="viewProfileData.first_name ? viewProfileData.first_name[0] : ''"></span>
                         </div>
-                        <div class="text-center mt-4">
-                            <div class="text-xl font-bold flex items-center justify-center gap-2">
+                        <div class="text-center mt-4 px-4">
+                            <div class="text-lg md:text-xl font-bold flex items-center justify-center gap-2 flex-wrap">
                                  <span x-text="viewProfileData.first_name + ' ' + viewProfileData.last_name"></span>
                                 <template x-if="viewProfileData.is_admin"><span class="admin-badge">Admin</span></template>
                             </div>
-                             <div class="text-sm mt-1" :class="viewProfileData.is_online ? 'text-blue-400' : 'text-gray-400'" 
+                             <div class="text-xs md:text-sm mt-1" :class="viewProfileData.is_online ? 'text-blue-400' : 'text-gray-400'" 
                                  x-text="viewProfileData.is_online ? 'в сети' : 'был(а) ' + (viewProfileData.last_seen || 'недавно')"></div>
                         </div>
                     </div>
@@ -404,41 +415,41 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     <div class="px-6 pb-6 space-y-4">
                         <template x-if="viewProfileData.phone">
                             <div class="border-b border-gray-700 pb-2">
-                                <div class="text-[15px] font-medium" x-text="viewProfileData.phone"></div>
-                                <div class="text-xs text-gray-500">Телефон</div>
+                                <div class="text-[14px] md:text-[15px] font-medium" x-text="viewProfileData.phone"></div>
+                                <div class="text-[10px] md:text-xs text-gray-500">Телефон</div>
                             </div>
                         </template>
 
                         <template x-if="viewProfileData.about_me">
                              <div class="border-b border-gray-700 pb-2">
-                                <div class="text-[15px] whitespace-pre-wrap" x-text="viewProfileData.about_me"></div>
-                                <div class="text-xs text-gray-500">О себе</div>
+                                <div class="text-[14px] md:text-[15px] whitespace-pre-wrap" x-text="viewProfileData.about_me"></div>
+                                <div class="text-[10px] md:text-xs text-gray-500">О себе</div>
                              </div>
                         </template>
 
                         <div class="border-b border-gray-700 pb-2">
-                            <div class="text-[15px] text-blue-400" x-text="'@' + viewProfileData.username"></div>
-                            <div class="text-xs text-gray-500">Имя пользователя</div>
+                            <div class="text-[14px] md:text-[15px] text-blue-400" x-text="'@' + viewProfileData.username"></div>
+                            <div class="text-[10px] md:text-xs text-gray-500">Имя пользователя</div>
                         </div>
 
                         <template x-if="viewProfileData.formatted_bday">
                             <div class="border-b border-gray-700 pb-2">
-                                <div class="text-[15px]" x-text="viewProfileData.formatted_bday"></div>
-                                <div class="text-xs text-gray-500">День рождения</div>
+                                <div class="text-[14px] md:text-[15px]" x-text="viewProfileData.formatted_bday"></div>
+                                <div class="text-[10px] md:text-xs text-gray-500">День рождения</div>
                             </div>
                         </template>
 
                         <template x-if="!isMyProfile && !viewProfileData.phone && !viewProfileData.about_me && !viewProfileData.formatted_bday">
-                            <div class="text-center text-gray-500 text-sm mt-4 italic">Дополнительная информация скрыта или не указана</div>
+                            <div class="text-center text-gray-500 text-xs md:text-sm mt-4 italic">Дополнительная информация скрыта или не указана</div>
                         </template>
                     </div>
                 </div>
 
                 <div x-show="editMode" class="p-6 overflow-y-auto max-h-[80vh]">
-                    <h3 class="text-lg font-bold mb-4 text-blue-400">Редактирование профиля</h3>
+                    <h3 class="text-base md:text-lg font-bold mb-4 text-blue-400">Редактирование профиля</h3>
 
                     <div class="flex flex-col items-center mb-4">
-                        <div class="w-24 h-24 rounded-full bg-blue-600 mb-2 flex items-center justify-center text-3xl font-bold overflow-hidden relative group">
+                        <div class="w-20 h-20 md:w-24 md:h-24 rounded-full bg-blue-600 mb-2 flex items-center justify-center text-3xl font-bold overflow-hidden relative group">
                             <img x-show="editProfileData.avatar" :src="editProfileData.avatar" class="w-full h-full object-cover">
                             <span x-show="!editProfileData.avatar" x-text="editProfileData.first_name[0]"></span>
 
@@ -447,21 +458,21 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                 <input type="file" class="hidden" accept="image/*" @change="handleAvatarSelect">
                             </label>
                         </div>
-                        <div class="text-xs text-gray-400">Нажмите для изменения фото</div>
+                        <div class="text-[10px] md:text-xs text-gray-400">Нажмите для изменения фото</div>
                     </div>
 
                     <div class="space-y-4">
                          <div>
-                            <label class="text-xs text-gray-400">Имя</label>
+                            <label class="text-[10px] md:text-xs text-gray-400">Имя</label>
                             <input type="text" x-model="editProfileData.first_name" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500 mb-2">
 
-                            <label class="text-xs text-gray-400">Фамилия</label>
+                            <label class="text-[10px] md:text-xs text-gray-400">Фамилия</label>
                             <input type="text" x-model="editProfileData.last_name" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500 mb-2">
 
-                            <label class="text-xs text-gray-400">Имя пользователя (никнейм)</label>
+                            <label class="text-[10px] md:text-xs text-gray-400">Имя пользователя (никнейм)</label>
                             <input type="text" x-model="editProfileData.username" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500 mb-2">
 
-                            <label class="text-xs text-gray-400">День рождения</label>
+                            <label class="text-[10px] md:text-xs text-gray-400">День рождения</label>
                             <div class="flex gap-2">
                                 <input type="number" x-model="editProfileData.birth_day" placeholder="День" class="w-1/3 bg-[#1c242f] border-none rounded p-2 text-sm text-white text-center focus:ring-1 focus:ring-blue-500">
                                 <input type="number" x-model="editProfileData.birth_month" placeholder="Мес (1-12)" class="w-1/3 bg-[#1c242f] border-none rounded p-2 text-sm text-white text-center focus:ring-1 focus:ring-blue-500">
@@ -470,34 +481,34 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         </div>
 
                         <div>
-                            <label class="text-xs text-gray-400">Телефон</label>
+                            <label class="text-[10px] md:text-xs text-gray-400">Телефон</label>
                             <input type="text" x-model="editProfileData.phone" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500">
                         </div>
                         <div>
-                            <label class="text-xs text-gray-400">О себе</label>
+                            <label class="text-[10px] md:text-xs text-gray-400">О себе</label>
                             <textarea x-model="editProfileData.about_me" rows="2" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500"></textarea>
                         </div>
 
                         <div class="mt-4 pt-4 border-t border-gray-700">
-                            <h4 class="text-sm font-semibold mb-2 text-gray-300">Настройки приватности</h4>
-                            <p class="text-[10px] text-gray-500 mb-2">Отметьте, что могут видеть другие пользователи (Аватар и Ник видны всегда)</p>
+                            <h4 class="text-xs md:text-sm font-semibold mb-2 text-gray-300">Настройки приватности</h4>
+                            <p class="text-[9px] md:text-[10px] text-gray-500 mb-2">Отметьте, что могут видеть другие пользователи (Аватар и Ник видны всегда)</p>
 
                             <label class="flex items-center gap-2 mb-1">
                                 <input type="checkbox" x-model="editProfileData.show_phone" class="rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
-                                <span class="text-sm text-gray-300">Показывать Телефон</span>
+                                <span class="text-xs md:text-sm text-gray-300">Показывать Телефон</span>
                             </label>
                             <label class="flex items-center gap-2 mb-1">
                                 <input type="checkbox" x-model="editProfileData.show_about" class="rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
-                                <span class="text-sm text-gray-300">Показывать "О себе"</span>
+                                <span class="text-xs md:text-sm text-gray-300">Показывать "О себе"</span>
                             </label>
                             <label class="flex items-center gap-2">
                                 <input type="checkbox" x-model="editProfileData.show_birth_date" class="rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
-                                <span class="text-sm text-gray-300">Показывать День рождения</span>
+                                <span class="text-xs md:text-sm text-gray-300">Показывать День рождения</span>
                             </label>
                         </div>
 
                         <div class="mt-4 pt-4 border-t border-gray-700">
-                             <h4 class="text-sm font-semibold mb-2 text-gray-300">Смена пароля</h4>
+                             <h4 class="text-xs md:text-sm font-semibold mb-2 text-gray-300">Смена пароля</h4>
                              <input type="password" x-model="editProfileData.new_password" placeholder="Новый пароль (оставьте пустым если нет)" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500">
                         </div>
 
@@ -581,6 +592,11 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                              if(data.last_seen) this.viewProfileData.last_seen = data.last_seen;
                          }
                     });
+                },
+
+                // Добавлена функция для возврата назад на мобильных
+                closeChat() {
+                    this.currentChat = null;
                 },
 
                 async fetchMyProfile() {
@@ -708,10 +724,10 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 """
 
 ADMIN_TEMPLATE = BASE_HTML_HEAD + """
-    <div class="container mx-auto p-6 pt-10">
+    <div class="container mx-auto p-4 md:p-6 pt-10">
         <div class="flex justify-between items-center mb-8">
-            <h1 class="text-3xl font-bold text-white">Панель Администратора</h1>
-            <a href="{{ url_for('index') }}" class="text-blue-400 hover:text-blue-300 transition">&larr; В мессенджер</a>
+            <h1 class="text-xl md:text-3xl font-bold text-white">Панель Администратора</h1>
+            <a href="{{ url_for('index') }}" class="text-blue-400 hover:text-blue-300 transition text-sm md:text-base">&larr; Назад</a>
         </div>
 
         {% with messages = get_flashed_messages() %}
@@ -722,47 +738,47 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
           {% endif %}
         {% endwith %}
 
-        <div class="bg-gray-800 rounded-xl shadow-xl border border-gray-700 overflow-hidden">
-            <table class="w-full text-left border-collapse">
+        <div class="bg-gray-800 rounded-xl shadow-xl border border-gray-700 overflow-x-auto">
+            <table class="w-full text-left border-collapse min-w-[600px]">
                 <thead>
-                    <tr class="bg-gray-900 border-b border-gray-700 text-gray-400 uppercase text-xs">
-                        <th class="p-4">ID</th>
-                        <th class="p-4">Пользователь / Ник</th>
-                        <th class="p-4">Статус</th>
-                        <th class="p-4 text-right">Действия</th>
+                    <tr class="bg-gray-900 border-b border-gray-700 text-gray-400 uppercase text-[10px] md:text-xs">
+                        <th class="p-3 md:p-4">ID</th>
+                        <th class="p-3 md:p-4">Пользователь / Ник</th>
+                        <th class="p-3 md:p-4">Статус</th>
+                        <th class="p-3 md:p-4 text-right">Действия</th>
                     </tr>
                 </thead>
-                <tbody class="text-sm">
+                <tbody class="text-xs md:text-sm">
                     {% for u in users %}
                     <tr class="border-b border-gray-700 hover:bg-gray-750 transition">
-                        <td class="p-4 text-gray-500">#{{ u.id }}</td>
-                        <td class="p-4">
+                        <td class="p-3 md:p-4 text-gray-500">#{{ u.id }}</td>
+                        <td class="p-3 md:p-4">
                             <div class="font-semibold text-white flex items-center gap-2">
                                 {{ u.first_name }} {{ u.last_name }}
                                 {% if u.is_admin %}<span class="admin-badge">Admin</span>{% endif %}
                             </div>
-                            <div class="text-xs text-blue-400">@{{ u.username }}</div>
+                            <div class="text-[10px] md:text-xs text-blue-400">@{{ u.username }}</div>
                         </td>
-                        <td class="p-4 text-gray-500">
+                        <td class="p-3 md:p-4 text-gray-500">
                             {% if u.id in connected %} <span class="text-blue-500 font-bold">В сети</span> 
                             {% else %} Был(а) {{ u.last_seen.strftime('%H:%M %d.%m') if u.last_seen else '-' }}
                             {% endif %}
                         </td>
-                        <td class="p-4 text-right space-x-2">
+                        <td class="p-3 md:p-4 text-right space-x-1 md:space-x-2">
                             {% if u.id != current_user.id %}
                                 {% if u.is_admin %}
                                     {% if current_user.promoted_by_id == u.id %}
-                                        <span class="text-gray-600 text-xs italic" title="Этот администратор назначил вас.">Недоступно</span>
+                                        <span class="text-gray-600 text-[10px] md:text-xs italic" title="Этот администратор назначил вас.">Недоступно</span>
                                     {% else %}
-                                        <a href="{{ url_for('admin_action', target_id=u.id, action='demote') }}" class="inline-block bg-red-900/50 hover:bg-red-800 text-red-300 border border-red-700 px-3 py-1.5 rounded text-xs transition">Разжаловать</a>
+                                        <a href="{{ url_for('admin_action', target_id=u.id, action='demote') }}" class="inline-block bg-red-900/50 hover:bg-red-800 text-red-300 border border-red-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">Разжаловать</a>
                                     {% endif %}
                                 {% else %}
-                                    <a href="{{ url_for('admin_action', target_id=u.id, action='promote') }}" class="inline-block bg-green-900/50 hover:bg-green-800 text-green-300 border border-green-700 px-3 py-1.5 rounded text-xs transition">Назначить Админом</a>
+                                    <a href="{{ url_for('admin_action', target_id=u.id, action='promote') }}" class="inline-block bg-green-900/50 hover:bg-green-800 text-green-300 border border-green-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">Дать Админа</a>
                                 {% endif %}
 
-                                <a href="{{ url_for('impersonate', target_id=u.id) }}" class="inline-block bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-xs transition shadow">Войти как</a>
+                                <a href="{{ url_for('impersonate', target_id=u.id) }}" class="inline-block bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition shadow">Войти как</a>
                             {% else %}
-                                <span class="text-gray-600 text-xs italic">Это вы</span>
+                                <span class="text-gray-600 text-[10px] md:text-xs italic">Это вы</span>
                             {% endif %}
                         </td>
                     </tr>
