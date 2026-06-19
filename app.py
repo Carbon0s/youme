@@ -15,7 +15,6 @@ from flask_socketio import SocketIO, emit, join_room
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'super-secret-key-for-youme-12345')
 
-# Подключение к PostgreSQL Aiven (исправление префикса для Render)
 db_url = os.environ.get(
     'DATABASE_URL', 
     "postgresql://avnadmin:AVNS_A094KJpWYOSX9t3_eM6@youme-krossmag.l.aivencloud.com:25520/defaultdb?sslmode=require"
@@ -26,7 +25,6 @@ if db_url.startswith("postgres://"):
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# ОПТИМИЗАЦИЯ ПУЛА СОЕДИНЕНИЙ (УБИРАЕТ ЗАДЕРЖКИ ПРИ ОТКРЫТИИ СТРАНИЦ)
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_size': 10,             
     'pool_recycle': 280,         
@@ -38,7 +36,6 @@ db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
-# Инициализация SocketIO с использованием gevent
 socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins="*")
 
 # ==========================================
@@ -65,8 +62,8 @@ class User(UserMixin, db.Model):
     username = db.Column(db.String(50), unique=True, nullable=False)
     password = db.Column(db.String(100), nullable=False)
     first_name = db.Column(db.String(50), nullable=False)
-    last_name = db.Column(db.String(50), nullable=False)
-    class_name = db.Column(db.String(20))
+    last_name = db.Column(db.String(50), nullable=True) # Сделано необязательным
+    class_name = db.Column(db.String(20), nullable=True)
 
     avatar_url = db.Column(db.Text, nullable=True)
     phone = db.Column(db.String(20), nullable=True)
@@ -110,14 +107,18 @@ class Message(db.Model):
     image_base64 = db.Column(db.Text, nullable=True)
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
     is_read = db.Column(db.Boolean, default=False)
+    
+    # Поля расширенного функционала сообщений
+    is_deleted = db.Column(db.Boolean, default=False)
+    is_edited = db.Column(db.Boolean, default=False)
+    original_text = db.Column(db.Text, nullable=True)
+    reply_to_id = db.Column(db.Integer, db.ForeignKey('messages.id', ondelete='SET NULL'), nullable=True)
+    forwarded_from_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
 
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
 
-# ==========================================
-# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
-# ==========================================
 connected_users = {}
 
 # ==========================================
@@ -128,7 +129,7 @@ BASE_HTML_HEAD = """
 <html lang="ru" class="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>You`me</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -155,9 +156,9 @@ BASE_HTML_HEAD = """
         }
     </style>
 </head>
-<body class="bg-gray-900 text-gray-100 h-screen w-screen overflow-hidden flex flex-col font-sans fixed inset-0">
+<body class="bg-gray-900 text-gray-100 h-[100dvh] w-screen overflow-hidden flex flex-col font-sans fixed inset-0 select-none">
     {% if session.get('original_admin_id') %}
-    <div class="bg-red-600 text-white text-center py-2 text-xs md:text-sm font-bold flex justify-center items-center gap-2 md:gap-4 z-50 shadow-lg px-2">
+    <div class="bg-red-600 text-white text-center py-2 text-xs md:text-sm font-bold flex justify-center items-center gap-2 md:gap-4 z-50 shadow-lg px-2 flex-shrink-0">
         Внимание: Режим от лица {{ current_user.first_name }}!
         <a href="{{ url_for('revert_impersonate') }}" class="bg-white text-red-600 px-2 py-1 rounded-md hover:bg-gray-200 transition">Вернуться</a>
     </div>
@@ -197,12 +198,9 @@ LOGIN_TEMPLATE = BASE_HTML_HEAD + """
                 <div>
                     <input type="password" name="password" placeholder="Пароль" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
                 </div>
-                <div class="flex gap-2">
-                    <input type="text" name="first_name" placeholder="Имя" required class="w-1/2 bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
-                    <input type="text" name="last_name" placeholder="Фамилия" required class="w-1/2 bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
-                </div>
-                <div>
-                    <input type="text" name="class_name" placeholder="Класс (напр. 10А)" class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
+                <div class="flex flex-col gap-4 md:gap-2">
+                    <input type="text" name="first_name" placeholder="Имя" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
+                    <input type="text" name="last_name" placeholder="Фамилия (необязательно)" class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
                 </div>
                 <button type="submit" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 md:py-2 rounded transition">Зарегистрироваться</button>
                 <p class="text-center text-sm text-gray-400 mt-4">Уже есть аккаунт? <a href="#" @click.prevent="isLogin = true" class="text-blue-400 hover:underline">Войти</a></p>
@@ -214,12 +212,12 @@ LOGIN_TEMPLATE = BASE_HTML_HEAD + """
 """
 
 APP_TEMPLATE = BASE_HTML_HEAD + """
-    <div class="flex-1 flex overflow-hidden w-full h-full" x-data="messengerApp()">
+    <div class="flex-1 flex overflow-hidden w-full h-full max-h-full" x-data="messengerApp()">
 
-        <div class="bg-gray-900 border-r border-gray-800 flex-col flex-shrink-0 w-full md:w-80 h-full"
+        <div class="bg-gray-900 border-r border-gray-800 flex-col flex-shrink-0 w-full md:w-80 h-full max-h-full"
              :class="currentChat ? 'hidden md:flex' : 'flex'">
              
-            <div class="p-4 border-b border-gray-800 flex justify-between items-center relative">
+            <div class="p-4 border-b border-gray-800 flex justify-between items-center flex-shrink-0 relative">
                 <div class="flex items-center gap-3">
                     <div @click="openMyProfile()" class="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold cursor-pointer overflow-hidden shadow-md hover:ring-2 hover:ring-blue-400 transition">
                         <img x-show="myProfileData.avatar" :src="myProfileData.avatar" class="w-full h-full object-cover">
@@ -232,7 +230,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 <div class="flex gap-2">
                     {% if current_user.is_admin %}
                     <a href="{{ url_for('admin_panel') }}" class="p-1 text-gray-400 hover:text-white" title="Админ Панель">
-                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.427.738-3.2 2.23-2.47z"></path></svg>
                     </a>
                     {% endif %}
                     <a href="{{ url_for('logout') }}" class="p-1 text-gray-400 hover:text-red-500" title="Выйти">
@@ -241,11 +239,11 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 </div>
             </div>
 
-            <div class="p-3">
+            <div class="p-3 flex-shrink-0">
                 <input type="text" autocomplete="new-password" spellcheck="false" x-model="searchQuery" @input.debounce.300ms="searchUsers()" placeholder="Поиск (@username или имя)..." class="w-full bg-gray-800 text-sm text-gray-200 rounded-full px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
             </div>
 
-            <div class="flex-1 overflow-y-auto">
+            <div class="flex-1 overflow-y-auto max-h-full">
                 <template x-if="searchQuery.length > 0">
                     <div>
                         <div class="px-4 py-2 text-xs font-semibold text-gray-500 uppercase">Результаты</div>
@@ -257,7 +255,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                 </div>
                                 <div class="flex-1 min-w-0">
                                     <div class="flex items-center gap-2">
-                                        <div class="text-sm font-semibold truncate" x-text="user.first_name + ' ' + user.last_name"></div>
+                                        <div class="text-sm font-semibold truncate" x-text="user.first_name + ' ' + (user.last_name || '')"></div>
                                         <template x-if="user.is_admin">
                                             <span class="admin-badge">Admin</span>
                                         </template>
@@ -299,7 +297,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         </div>
 
-        <div class="flex-1 flex-col relative bg-[#0f172a] bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] h-full w-full" 
+        <div class="flex-1 flex-col relative bg-[#0f172a] bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] h-full w-full max-h-full overflow-hidden" 
              style="background-blend-mode: overlay;"
              :class="currentChat ? 'flex' : 'hidden md:flex'">
 
@@ -310,9 +308,9 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </template>
 
             <template x-if="currentChat">
-                <div class="flex-1 flex flex-col h-full w-full">
+                <div class="flex-1 flex flex-col h-full w-full max-h-full overflow-hidden">
                     
-                    <div class="h-16 px-3 md:px-6 bg-gray-900/95 backdrop-blur-md border-b border-gray-800 flex items-center justify-between shadow-sm z-10">
+                    <div class="h-16 px-3 md:px-6 bg-gray-900/95 backdrop-blur-md border-b border-gray-800 flex items-center justify-between shadow-sm z-10 flex-shrink-0">
                         <div class="flex items-center gap-2 md:gap-4 min-w-0">
                             <button @click="closeChat()" class="md:hidden p-2 -ml-2 text-gray-400 hover:text-white transition flex-shrink-0">
                                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
@@ -337,11 +335,29 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         </div>
                     </div>
 
-                    <div class="flex-1 overflow-y-auto p-4 md:p-6 space-y-4" id="messagesBox">
+                    <div class="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 max-h-full" id="messagesBox">
                         <template x-for="msg in messages" :key="msg.id">
-                            <div class="flex" :class="msg.sender_id === {{ current_user.id }} ? 'justify-end' : 'justify-start'">
-                                <div class="max-w-[85%] md:max-w-[70%] rounded-2xl px-3 py-2 md:px-4 shadow-md relative group"
-                                     :class="msg.sender_id === {{ current_user.id }} ? 'bg-blue-600 text-white rounded-tr-sm' : 'bg-gray-800 text-gray-100 rounded-tl-sm'">
+                            <div class="flex w-full" :class="msg.sender_id === {{ current_user.id }} ? 'justify-end' : 'justify-start'">
+                                
+                                <div class="max-w-[85%] md:max-w-[70%] rounded-2xl px-3 py-2 md:px-4 shadow-md relative group flex flex-col select-text"
+                                     :class="msg.is_deleted ? 'bg-red-950/40 border border-red-900 text-red-200 rounded-sm' : (msg.sender_id === {{ current_user.id }} ? 'bg-blue-600 text-white rounded-tr-sm' : 'bg-gray-800 text-gray-100 rounded-tl-sm')"
+                                     @contextmenu.prevent="openContextMenu($event, msg, false)"
+                                     @touchstart="handleTouchStart($event, msg)"
+                                     @touchend="handleTouchEnd()"
+                                     @touchmove="handleTouchEnd()">
+
+                                    <template x-if="msg.forwarded_from_id">
+                                        <div @click.stop="startChat(msg.forwarded_from_id)" class="text-[11px] text-blue-300 font-medium mb-1 border-b border-blue-500/20 pb-0.5 cursor-pointer hover:underline truncate">
+                                            Переслано от: <span class="font-bold text-white" x-text="msg.forwarded_from_name"></span>
+                                        </div>
+                                    </template>
+
+                                    <template x-if="msg.reply_to_id">
+                                        <div class="bg-black/20 rounded-md px-2 py-1 mb-1 border-l-2 border-blue-400 text-[11px] text-gray-300 opacity-90 truncate">
+                                            <span class="text-blue-400 font-bold block text-[9px] uppercase tracking-wide">Отвечено на:</span>
+                                            <span x-text="msg.reply_text"></span>
+                                        </div>
+                                    </template>
 
                                     <template x-if="msg.image_base64">
                                         <img :src="msg.image_base64" class="rounded-lg mb-2 max-w-full h-auto cursor-pointer">
@@ -349,9 +365,15 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
                                     <div class="text-[14px] md:text-[15px] leading-relaxed break-words" x-text="msg.text"></div>
 
-                                    <div class="text-[10px] text-right mt-1 flex items-center justify-end gap-1 opacity-70" :class="msg.sender_id === {{ current_user.id }} ? 'text-blue-200' : 'text-gray-400'">
+                                    <div class="text-[10px] text-right mt-1 flex items-center justify-end gap-1 opacity-70" :class="msg.is_deleted ? 'text-red-400' : (msg.sender_id === {{ current_user.id }} ? 'text-blue-200' : 'text-gray-400')">
+                                        <template x-if="msg.is_edited && !msg.is_deleted">
+                                            <span class="text-[9px] italic mr-1 text-gray-300">(изменено)</span>
+                                        </template>
+                                        <template x-if="msg.is_deleted">
+                                            <span class="text-[9px] font-bold text-red-400 mr-1">(удалено)</span>
+                                        </template>
                                         <span x-text="msg.time"></span>
-                                        <template x-if="msg.sender_id === {{ current_user.id }}">
+                                        <template x-if="msg.sender_id === {{ current_user.id }} && !msg.is_deleted">
                                             <span class="font-bold text-[11px]" :class="msg.is_read ? 'text-[#4da3ff]' : 'text-blue-200'" x-text="msg.is_read ? '✓✓' : '✓'"></span>
                                         </template>
                                     </div>
@@ -361,13 +383,32 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         </template>
                     </div>
 
-                    <div class="bg-gray-900 p-2 md:p-4 border-t border-gray-800 w-full">
-                        <div x-show="imagePreview" class="mb-3 relative inline-block">
-                            <img :src="imagePreview" class="h-16 md:h-20 rounded-lg border border-gray-600">
-                            <button @click="imagePreview = null" class="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs shadow">x</button>
+                    <div class="bg-gray-900 border-t border-gray-800 w-full flex-shrink-0 pb-safe">
+                        
+                        <div x-show="replyToMessage" style="display:none;" class="bg-gray-800/80 p-2 px-4 flex justify-between items-center text-xs text-gray-300 border-b border-gray-700/50">
+                            <div class="truncate flex items-center gap-1">
+                                <span class="text-blue-400 font-bold uppercase text-[10px]">Ответить на:</span>
+                                <span class="italic truncate max-w-xs" x-text="replyToMessage ? (replyToMessage.text || '[Фото]') : ''"></span>
+                            </div>
+                            <button @click="replyToMessage = null" class="text-gray-400 hover:text-white font-bold text-sm px-1">✕</button>
                         </div>
 
-                        <div class="flex items-center gap-2 md:gap-3 w-full max-w-4xl mx-auto">
+                        <div x-show="editMessage" style="display:none;" class="bg-gray-800/80 p-2 px-4 flex justify-between items-center text-xs text-gray-300 border-b border-gray-700/50">
+                            <div class="truncate flex items-center gap-1">
+                                <span class="text-yellow-500 font-bold uppercase text-[10px]">Редактирование:</span>
+                                <span class="italic truncate max-w-xs" x-text="editMessage ? editMessage.text : ''"></span>
+                            </div>
+                            <button @click="cancelEdit()" class="text-gray-400 hover:text-white font-bold text-sm px-1">✕</button>
+                        </div>
+
+                        <div x-show="imagePreview" style="display:none;" class="p-2 bg-gray-800/50 border-b border-gray-700/50">
+                            <div class="relative inline-block">
+                                <img :src="imagePreview" class="h-16 rounded-lg border border-gray-600 shadow-md">
+                                <button @click="imagePreview = null" class="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold shadow">✕</button>
+                            </div>
+                        </div>
+
+                        <div class="p-2 md:p-4 flex items-center gap-2 md:gap-3 w-full max-w-4xl mx-auto">
                             <label class="cursor-pointer p-2 text-gray-400 hover:text-blue-500 transition flex-shrink-0">
                                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
                                 <input type="file" class="hidden" accept="image/*" @change="handleImageSelect">
@@ -384,8 +425,73 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </template>
         </div>
 
+        <div x-show="contextMenu.show" 
+             @click.away="contextMenu.show = false"
+             class="fixed bg-gray-800 border border-gray-700 text-white rounded-xl shadow-2xl w-44 py-1.5 z-50 text-xs md:text-sm font-medium"
+             :style="`left: ${contextMenu.x}px; top: ${contextMenu.y}px;`"
+             style="display: none;">
+             
+             <button @click="actionReply()" class="w-full text-left px-4 py-2 hover:bg-gray-700 flex items-center gap-2 text-gray-200">
+                 <span>Ответить</span>
+             </button>
+             
+             <template x-if="contextMenu.msg && contextMenu.msg.sender_id === myId && !contextMenu.msg.is_deleted">
+                 <button @click="actionEdit()" class="w-full text-left px-4 py-2 hover:bg-gray-700 flex items-center gap-2 text-gray-200">
+                     <span>Изменить</span>
+                 </button>
+             </template>
+             
+             <button @click="actionForward()" class="w-full text-left px-4 py-2 hover:bg-gray-700 flex items-center gap-2 text-gray-200">
+                 <span>Переслать</span>
+             </button>
+             
+             <template x-if="contextMenu.msg && (contextMenu.msg.sender_id === myId || {{ 'true' if current_user.is_admin else 'false' }}) && !contextMenu.msg.is_deleted">
+                 <button @click="actionDelete()" class="w-full text-left px-4 py-2 hover:bg-red-950/40 text-red-400 flex items-center gap-2">
+                     <span>Удалить</span>
+                 </button>
+             </template>
+
+             <template x-if="{{ 'true' if current_user.is_admin else 'false' }} && contextMenu.msg && contextMenu.msg.is_edited">
+                 <button @click="actionShowHistory()" class="w-full text-left px-4 py-2 hover:bg-yellow-950/40 text-yellow-400 border-t border-gray-700 mt-1 flex items-center gap-2">
+                     <span>История изменений</span>
+                 </button>
+             </template>
+        </div>
+
+        <div x-show="forwardModal" style="display: none;" 
+             class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-0 md:p-4"
+             @click.self="forwardModal = false">
+             <div class="bg-[#1e293b] w-full h-full md:h-auto md:max-w-md md:rounded-xl shadow-2xl flex flex-col overflow-hidden border border-gray-700">
+                 <div class="p-4 bg-gray-900 border-b border-gray-700 flex justify-between items-center flex-shrink-0">
+                     <h3 class="font-bold text-white text-base">Переслать сообщение в...</h3>
+                     <button @click="forwardModal = false" class="text-gray-400 hover:text-white font-bold text-xl px-2">✕</button>
+                 </div>
+                 <div class="flex-1 overflow-y-auto max-h-full p-2 space-y-1">
+                     <template x-for="chat in chats" :key="chat.chat_id">
+                         <div @click="executeForward(chat.chat_id)" class="flex items-center gap-3 px-4 py-3 bg-gray-800/40 hover:bg-blue-600 rounded-lg cursor-pointer transition">
+                             <div class="w-10 h-10 rounded-full bg-gray-700 overflow-hidden flex items-center justify-center font-bold text-white flex-shrink-0">
+                                 <img x-show="chat.partner_avatar" :src="chat.partner_avatar" class="w-full h-full object-cover">
+                                 <span x-show="!chat.partner_avatar" x-text="chat.partner_name[0]"></span>
+                             </div>
+                             <div class="text-sm font-semibold text-white truncate" x-text="chat.partner_name"></div>
+                         </div>
+                     </template>
+                 </div>
+             </div>
+        </div>
+
+        <div x-show="showHistoryModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" @click.self="showHistoryModal = false">
+            <div class="bg-[#1e293b] p-5 rounded-xl border border-gray-700 max-w-sm w-full shadow-2xl">
+                <h3 class="text-yellow-400 font-bold mb-3 text-sm md:text-base">Исходный текст сообщения</h3>
+                <div class="text-gray-200 text-sm bg-gray-900 p-3 rounded border border-gray-800 whitespace-pre-wrap break-words max-h-60 overflow-y-auto select-text" x-text="historyText"></div>
+                <div class="mt-4 flex justify-end">
+                    <button @click="showHistoryModal = false" class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-1.5 px-4 rounded-full text-xs transition">Закрыть</button>
+                </div>
+            </div>
+        </div>
+
         <div x-show="showProfileModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" @click.self="closeProfileModal()">
-            <div class="bg-[#242f3d] w-full max-w-sm rounded-lg shadow-2xl overflow-hidden flex flex-col relative text-gray-100 animate-fade-in-up">
+            <div class="bg-[#242f3d] w-full max-w-sm rounded-lg shadow-2xl overflow-hidden flex flex-col relative text-gray-100">
 
                 <div class="absolute top-4 right-4 flex gap-4 z-20">
                     <button x-show="isMyProfile" @click="editMode = true" class="text-white hover:text-blue-400 drop-shadow-md">
@@ -404,7 +510,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         </div>
                         <div class="text-center mt-4 px-4">
                             <div class="text-lg md:text-xl font-bold flex items-center justify-center gap-2 flex-wrap">
-                                 <span x-text="viewProfileData.first_name + ' ' + viewProfileData.last_name"></span>
+                                 <span x-text="viewProfileData.first_name + ' ' + (viewProfileData.last_name || '')"></span>
                                 <template x-if="viewProfileData.is_admin"><span class="admin-badge">Admin</span></template>
                             </div>
                              <div class="text-xs md:text-sm mt-1" :class="viewProfileData.is_online ? 'text-blue-400' : 'text-gray-400'" 
@@ -415,20 +521,20 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     <div class="px-6 pb-6 space-y-4">
                         <template x-if="viewProfileData.phone">
                             <div class="border-b border-gray-700 pb-2">
-                                <div class="text-[14px] md:text-[15px] font-medium" x-text="viewProfileData.phone"></div>
+                                <div class="text-[14px] md:text-[15px] font-medium select-text" x-text="viewProfileData.phone"></div>
                                 <div class="text-[10px] md:text-xs text-gray-500">Телефон</div>
                             </div>
                         </template>
 
                         <template x-if="viewProfileData.about_me">
                              <div class="border-b border-gray-700 pb-2">
-                                <div class="text-[14px] md:text-[15px] whitespace-pre-wrap" x-text="viewProfileData.about_me"></div>
+                                <div class="text-[14px] md:text-[15px] whitespace-pre-wrap select-text" x-text="viewProfileData.about_me"></div>
                                 <div class="text-[10px] md:text-xs text-gray-500">О себе</div>
                              </div>
                         </template>
 
                         <div class="border-b border-gray-700 pb-2">
-                            <div class="text-[14px] md:text-[15px] text-blue-400" x-text="'@' + viewProfileData.username"></div>
+                            <div class="text-[14px] md:text-[15px] text-blue-400 select-text" x-text="'@' + viewProfileData.username"></div>
                             <div class="text-[10px] md:text-xs text-gray-500">Имя пользователя</div>
                         </div>
 
@@ -475,7 +581,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             <label class="text-[10px] md:text-xs text-gray-400">День рождения</label>
                             <div class="flex gap-2">
                                 <input type="number" x-model="editProfileData.birth_day" placeholder="День" class="w-1/3 bg-[#1c242f] border-none rounded p-2 text-sm text-white text-center focus:ring-1 focus:ring-blue-500">
-                                <input type="number" x-model="editProfileData.birth_month" placeholder="Мес (1-12)" class="w-1/3 bg-[#1c242f] border-none rounded p-2 text-sm text-white text-center focus:ring-1 focus:ring-blue-500">
+                                <input type="number" x-model="editProfileData.birth_month" placeholder="Мес" class="w-1/3 bg-[#1c242f] border-none rounded p-2 text-sm text-white text-center focus:ring-1 focus:ring-blue-500">
                                 <input type="number" x-model="editProfileData.birth_year" placeholder="Год" class="w-1/3 bg-[#1c242f] border-none rounded p-2 text-sm text-white text-center focus:ring-1 focus:ring-blue-500">
                             </div>
                         </div>
@@ -491,8 +597,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
                         <div class="mt-4 pt-4 border-t border-gray-700">
                             <h4 class="text-xs md:text-sm font-semibold mb-2 text-gray-300">Настройки приватности</h4>
-                            <p class="text-[9px] md:text-[10px] text-gray-500 mb-2">Отметьте, что могут видеть другие пользователи (Аватар и Ник видны всегда)</p>
-
                             <label class="flex items-center gap-2 mb-1">
                                 <input type="checkbox" x-model="editProfileData.show_phone" class="rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
                                 <span class="text-xs md:text-sm text-gray-300">Показывать Телефон</span>
@@ -509,7 +613,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
                         <div class="mt-4 pt-4 border-t border-gray-700">
                              <h4 class="text-xs md:text-sm font-semibold mb-2 text-gray-300">Смена пароля</h4>
-                             <input type="password" x-model="editProfileData.new_password" placeholder="Новый пароль (оставьте пустым если нет)" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500">
+                             <input type="password" x-model="editProfileData.new_password" placeholder="Новый пароль" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500">
                         </div>
 
                         <div class="flex gap-2 pt-4">
@@ -538,6 +642,18 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 imagePreview: null,
                 typing: {},
 
+                // Переменные функционала контекстного меню
+                contextMenu: { show: false, x: 0, y: 0, msg: null },
+                longPressTimer: null,
+                touchX: 0,
+                touchY: 0,
+                replyToMessage: null,
+                editMessage: null,
+                forwardModal: false,
+                forwardMessageTarget: null,
+                showHistoryModal: false,
+                historyText: '',
+
                 showProfileModal: false,
                 isMyProfile: false,
                 editMode: false,
@@ -554,16 +670,18 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     this.socket.on('new_message', (data) => {
                         if (this.currentChat && this.currentChat.chat_id === data.chat_id) {
                             if(data.sender_id !== this.myId) {
-                                fetch('/api/chat/' + data.chat_id + '/messages').then(res => res.json()).then(msgs => {
-                                    this.messages = msgs;
-                                    this.scrollToBottom();
-                                });
+                                this.reloadCurrentMessages();
                             } else {
                                 this.messages.push(data);
                                 this.scrollToBottom();
                             }
                         }
                         this.loadChats();
+                    });
+                    this.socket.on('message_updated', (data) => {
+                        if (this.currentChat && this.currentChat.chat_id === data.chat_id) {
+                            this.reloadCurrentMessages();
+                        }
                     });
                     this.socket.on('messages_read', (data) => {
                         if (this.currentChat && this.currentChat.chat_id === data.chat_id) {
@@ -594,16 +712,85 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     });
                 },
 
-                // Добавлена функция для возврата назад на мобильных
                 closeChat() {
                     this.currentChat = null;
+                    this.replyToMessage = null;
+                    this.editMessage = null;
+                },
+
+                // Логика Контекстного Меню и Зажатий
+                openContextMenu(e, msg, isMobile) {
+                    this.contextMenu.msg = msg;
+                    if (isMobile) {
+                        this.contextMenu.x = Math.min(this.touchX, window.innerWidth - 190);
+                        this.contextMenu.y = Math.min(this.touchY, window.innerHeight - 200);
+                    } else {
+                        this.contextMenu.x = Math.min(e.clientX, window.innerWidth - 190);
+                        this.contextMenu.y = Math.min(e.clientY, window.innerHeight - 200);
+                    }
+                    this.contextMenu.show = true;
+                },
+                handleTouchStart(e, msg) {
+                    if (e.touches && e.touches[0]) {
+                        this.touchX = e.touches[0].clientX;
+                        this.touchY = e.touches[0].clientY;
+                    }
+                    this.longPressTimer = setTimeout(() => {
+                        this.openContextMenu(null, msg, true);
+                    }, 500);
+                },
+                handleTouchEnd() {
+                    clearTimeout(this.longPressTimer);
+                },
+
+                actionReply() {
+                    this.contextMenu.show = false;
+                    this.editMessage = null;
+                    this.replyToMessage = this.contextMenu.msg;
+                },
+                actionEdit() {
+                    this.contextMenu.show = false;
+                    this.replyToMessage = null;
+                    this.editMessage = this.contextMenu.msg;
+                    this.newMessage = this.contextMenu.msg.text;
+                },
+                cancelEdit() {
+                    this.editMessage = null;
+                    this.newMessage = '';
+                },
+                actionForward() {
+                    this.contextMenu.show = false;
+                    this.forwardMessageTarget = this.contextMenu.msg;
+                    this.forwardModal = true;
+                },
+                executeForward(chatId) {
+                    if (!this.forwardMessageTarget) return;
+                    this.socket.emit('send_message', {
+                        chat_id: chatId,
+                        text: this.forwardMessageTarget.text,
+                        image_base64: this.forwardMessageTarget.image_base64,
+                        forwarded_from_id: this.forwardMessageTarget.sender_id
+                    });
+                    this.forwardModal = false;
+                    this.forwardMessageTarget = null;
+                    this.loadChats();
+                },
+                actionDelete() {
+                    this.contextMenu.show = false;
+                    if(confirm("Удалить это сообщение?")) {
+                        this.socket.emit('delete_message', { message_id: this.contextMenu.msg.id });
+                    }
+                },
+                actionShowHistory() {
+                    this.contextMenu.show = false;
+                    this.historyText = this.contextMenu.msg.original_text || 'История изменений отсутствует.';
+                    this.showHistoryModal = true;
                 },
 
                 async fetchMyProfile() {
                     const res = await fetch('/api/profile/me');
                     this.myProfileData = await res.json();
                 },
-
                 openMyProfile() {
                     this.isMyProfile = true;
                     this.editMode = false;
@@ -611,24 +798,18 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     this.editProfileData = { ...this.myProfileData, new_password: '' };
                     this.showProfileModal = true;
                 },
-
                 async openUserProfile(userId) {
-                    if(userId === this.myId) {
-                        this.openMyProfile();
-                        return;
-                    }
+                    if(userId === this.myId) { return this.openMyProfile(); }
                     this.isMyProfile = false;
                     this.editMode = false;
                     const res = await fetch('/api/profile/' + userId);
                     this.viewProfileData = await res.json();
                     this.showProfileModal = true;
                 },
-
                 closeProfileModal() {
                     this.showProfileModal = false;
                     this.editMode = false;
                 },
-
                 handleAvatarSelect(event) {
                     const file = event.target.files[0];
                     if (!file) return;
@@ -636,7 +817,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     reader.onload = (e) => { this.editProfileData.avatar = e.target.result; };
                     reader.readAsDataURL(file);
                 },
-
                 async saveProfile() {
                     const res = await fetch('/api/profile/me', {
                         method: 'POST',
@@ -654,18 +834,15 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     const res = await fetch('/api/chats');
                     this.chats = await res.json();
                 },
-
                 async searchUsers() {
                     let q = this.searchQuery.trim();
                     if (!q) { this.searchResults = []; return; }
-
                     if (q.startsWith('@') && q.length < 4) { this.searchResults = []; return; }
                     if (!q.startsWith('@') && q.length < 3) { this.searchResults = []; return; }
 
                     const res = await fetch('/api/search_users?q=' + encodeURIComponent(q));
                     this.searchResults = await res.json();
                 },
-
                 async startChat(userId) {
                     const res = await fetch('/api/chat/start/' + userId, { method: 'POST' });
                     const chatData = await res.json();
@@ -675,10 +852,15 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     const chat = this.chats.find(c => c.chat_id === chatData.chat_id);
                     if (chat) this.openChat(chat);
                 },
-
                 async openChat(chat) {
                     this.currentChat = chat;
-                    const res = await fetch('/api/chat/' + chat.chat_id + '/messages');
+                    this.replyToMessage = null;
+                    this.editMessage = null;
+                    await this.reloadCurrentMessages();
+                },
+                async reloadCurrentMessages() {
+                    if (!this.currentChat) return;
+                    const res = await fetch('/api/chat/' + this.currentChat.chat_id + '/messages');
                     this.messages = await res.json();
                     this.scrollToBottom();
                 },
@@ -690,26 +872,34 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     reader.onload = (e) => { this.imagePreview = e.target.result; };
                     reader.readAsDataURL(file);
                 },
-
                 sendMessage() {
                     if (!this.newMessage.trim() && !this.imagePreview) return;
-                    const payload = {
-                        chat_id: this.currentChat.chat_id,
-                        text: this.newMessage.trim(),
-                        image_base64: this.imagePreview
-                    };
-                    this.socket.emit('send_message', payload);
+                    
+                    if (this.editMessage) {
+                        this.socket.emit('edit_message', {
+                            message_id: this.editMessage.id,
+                            text: this.newMessage.trim()
+                        });
+                        this.editMessage = null;
+                    } else {
+                        const payload = {
+                            chat_id: this.currentChat.chat_id,
+                            text: this.newMessage.trim(),
+                            image_base64: this.imagePreview,
+                            reply_to_id: this.replyToMessage ? this.replyToMessage.id : null
+                        };
+                        this.socket.emit('send_message', payload);
+                        this.replyToMessage = null;
+                    }
 
                     this.newMessage = '';
                     this.imagePreview = null;
                 },
-
                 sendTyping() {
                     if (this.currentChat) {
                         this.socket.emit('typing', { chat_id: this.currentChat.chat_id });
                     }
                 },
-
                 scrollToBottom() {
                     setTimeout(() => {
                         const box = document.getElementById('messagesBox');
@@ -754,7 +944,7 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                         <td class="p-3 md:p-4 text-gray-500">#{{ u.id }}</td>
                         <td class="p-3 md:p-4">
                             <div class="font-semibold text-white flex items-center gap-2">
-                                {{ u.first_name }} {{ u.last_name }}
+                                {{ u.first_name }} {{ u.last_name or '' }}
                                 {% if u.is_admin %}<span class="admin-badge">Admin</span>{% endif %}
                             </div>
                             <div class="text-[10px] md:text-xs text-blue-400">@{{ u.username }}</div>
@@ -768,7 +958,7 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                             {% if u.id != current_user.id %}
                                 {% if u.is_admin %}
                                     {% if current_user.promoted_by_id == u.id %}
-                                        <span class="text-gray-600 text-[10px] md:text-xs italic" title="Этот администратор назначил вас.">Недоступно</span>
+                                        <span class="text-gray-600 text-[10px] md:text-xs italic">Недоступно</span>
                                     {% else %}
                                         <a href="{{ url_for('admin_action', target_id=u.id, action='demote') }}" class="inline-block bg-red-900/50 hover:bg-red-800 text-red-300 border border-red-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">Разжаловать</a>
                                     {% endif %}
@@ -817,8 +1007,7 @@ def login():
                 username=username,
                 password=password,
                 first_name=request.form.get('first_name'),
-                last_name=request.form.get('last_name'),
-                class_name=request.form.get('class_name'),
+                last_name=request.form.get('last_name') or None,
                 last_seen=datetime.utcnow()
             )
             db.session.add(new_user)
@@ -859,7 +1048,7 @@ def my_profile():
     if request.method == 'POST':
         data = request.json
         current_user.first_name = data.get('first_name', current_user.first_name)
-        current_user.last_name = data.get('last_name', current_user.last_name)
+        current_user.last_name = data.get('last_name') or None
 
         new_username = data.get('username')
         if new_username:
@@ -956,7 +1145,7 @@ def get_chats():
         chats_data.append({
             'chat_id': cid,
             'partner_id': partner.id,
-            'partner_name': f"{partner.first_name} {partner.last_name}",
+            'partner_name': f"{partner.first_name} {partner.last_name or ''}",
             'partner_avatar': partner.avatar_url,
             'partner_is_admin': partner.is_admin,
             'last_message': last_msg.text if last_msg else ('[Фото]' if last_msg and last_msg.image_base64 else ''),
@@ -1016,6 +1205,7 @@ def start_chat(target_id):
 @app.route('/api/chat/<int:chat_id>/messages')
 @login_required
 def get_messages(chat_id):
+    # Пометка непрочитанных
     unread_msgs = Message.query.filter(Message.chat_id == chat_id, Message.sender_id != current_user.id,
                                        Message.is_read == False).all()
     if unread_msgs:
@@ -1028,15 +1218,45 @@ def get_messages(chat_id):
         if partner_cp:
             socketio.emit('messages_read', {'chat_id': chat_id}, room=f"user_{partner_cp.user_id}")
 
-    messages = Message.query.filter_by(chat_id=chat_id).order_by(Message.timestamp.asc()).all()
-    return jsonify([{
-        'id': m.id,
-        'sender_id': m.sender_id,
-        'text': m.text,
-        'image_base64': m.image_base64,
-        'time': m.timestamp.strftime('%H:%M'),
-        'is_read': m.is_read
-    } for m in messages])
+    # Фильтрация удаленных сообщений для обычных пользователей
+    if current_user.is_admin:
+        messages = Message.query.filter_by(chat_id=chat_id).order_by(Message.timestamp.asc()).all()
+    else:
+        messages = Message.query.filter_by(chat_id=chat_id, is_deleted=False).order_by(Message.timestamp.asc()).all()
+
+    result = []
+    for m in messages:
+        # Сборка текста ответа (цитаты)
+        reply_text = ""
+        if m.reply_to_id:
+            rm = Message.query.get(m.reply_to_id)
+            if rm:
+                reply_text = (rm.text[:25] + "...") if (rm.text and len(rm.text) > 25) else (rm.text or "[Фото]")
+
+        # Сборка имени автора пересланного сообщения
+        fwd_name = ""
+        if m.forwarded_from_id:
+            fu = User.query.get(m.forwarded_from_id)
+            if fu:
+                fwd_name = f"{fu.first_name} {fu.last_name or ''}"
+
+        result.append({
+            'id': m.id,
+            'sender_id': m.sender_id,
+            'text': m.text,
+            'image_base64': m.image_base64,
+            'time': m.timestamp.strftime('%H:%M'),
+            'is_read': m.is_read,
+            'is_deleted': m.is_deleted,
+            'is_edited': m.is_edited,
+            'original_text': m.original_text if current_user.is_admin else None,
+            'reply_to_id': m.reply_to_id,
+            'reply_text': reply_text,
+            'forwarded_from_id': m.forwarded_from_id,
+            'forwarded_from_name': fwd_name
+        })
+
+    return jsonify(result)
 
 # ==========================================
 # АДМИН ПАНЕЛЬ
@@ -1102,7 +1322,6 @@ def handle_connect():
         user_room = f"user_{current_user.id}"
         join_room(user_room)
         connected_users[current_user.id] = request.sid
-
         current_user.last_seen = datetime.utcnow()
         db.session.commit()
         emit('status_update', {'user_id': current_user.id, 'status': 'online'}, broadcast=True)
@@ -1112,7 +1331,6 @@ def handle_disconnect():
     if current_user.is_authenticated:
         if current_user.id in connected_users:
             del connected_users[current_user.id]
-
         u = User.query.get(current_user.id)
         if u:
             u.last_seen = datetime.utcnow()
@@ -1131,19 +1349,67 @@ def handle_typing(data):
 @socketio.on('send_message')
 def handle_message(data):
     chat_id = data.get('chat_id')
-    msg = Message(chat_id=chat_id, sender_id=current_user.id, text=data.get('text', ''),
-                  image_base64=data.get('image_base64'), is_read=False)
+    reply_to_id = data.get('reply_to_id')
+    forwarded_from_id = data.get('forwarded_from_id')
+
+    msg = Message(
+        chat_id=chat_id, sender_id=current_user.id, 
+        text=data.get('text', ''), image_base64=data.get('image_base64'), 
+        reply_to_id=reply_to_id, forwarded_from_id=forwarded_from_id,
+        is_read=False
+    )
     db.session.add(msg)
     db.session.commit()
+
+    reply_text = ""
+    if reply_to_id:
+        rm = Message.query.get(reply_to_id)
+        if rm: reply_text = (rm.text[:25] + "...") if (rm.text and len(rm.text) > 25) else (rm.text or "[Фото]")
+
+    fwd_name = ""
+    if forwarded_from_id:
+        fu = User.query.get(forwarded_from_id)
+        if fu: fwd_name = f"{fu.first_name} {fu.last_name or ''}"
 
     msg_data = {
         'id': msg.id, 'chat_id': chat_id, 'sender_id': current_user.id,
         'text': msg.text, 'image_base64': msg.image_base64,
-        'time': msg.timestamp.strftime('%H:%M'), 'is_read': False
+        'time': msg.timestamp.strftime('%H:%M'), 'is_read': False,
+        'is_deleted': False, 'is_edited': False, 'original_text': None,
+        'reply_to_id': reply_to_id, 'reply_text': reply_text,
+        'forwarded_from_id': forwarded_from_id, 'forwarded_from_name': fwd_name
     }
 
     for p in ChatParticipant.query.filter_by(chat_id=chat_id).all():
         emit('new_message', msg_data, room=f"user_{p.user_id}")
+
+@socketio.on('edit_message')
+def handle_edit_message(data):
+    msg_id = data.get('message_id')
+    new_text = data.get('text', '')
+    msg = Message.query.get(msg_id)
+    
+    if msg and (msg.sender_id == current_user.id or current_user.is_admin) and not msg.is_deleted:
+        if not msg.is_edited:
+            msg.original_text = msg.text
+            msg.is_edited = True
+        msg.text = new_text
+        db.session.commit()
+
+        for p in ChatParticipant.query.filter_by(chat_id=msg.chat_id).all():
+            emit('message_updated', {'chat_id': msg.chat_id}, room=f"user_{p.user_id}")
+
+@socketio.on('delete_message')
+def handle_delete_message(data):
+    msg_id = data.get('message_id')
+    msg = Message.query.get(msg_id)
+    
+    if msg and (msg.sender_id == current_user.id or current_user.is_admin):
+        msg.is_deleted = True
+        db.session.commit()
+
+        for p in ChatParticipant.query.filter_by(chat_id=msg.chat_id).all():
+            emit('message_updated', {'chat_id': msg.chat_id}, room=f"user_{p.user_id}")
 
 # ==========================================
 # ИНИЦИАЛИЗАЦИЯ И ЗАПУСК
@@ -1160,7 +1426,6 @@ def init_db():
             )
             db.session.add(admin)
             db.session.commit()
-            print(">>> База инициализирована. Создан admin:admin")
 
 init_db()
 
