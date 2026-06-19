@@ -1,8 +1,12 @@
-# ЭТИ ДВЕ СТРОКИ ДОЛЖНЫ БЫТЬ В САМОМ НАЧАЛЕ ФАЙЛА
-import eventlet
-eventlet.monkey_patch()
-
+# ==========================================
+# КРИТИЧЕСКИ ВАЖНЫЕ ПАТЧИ ДЛЯ RENDER + СОКЕТОВ
+# Эти строки должны быть В САМОМ НАЧАЛЕ ФАЙЛА до импорта Flask!
+# ==========================================
 import os
+os.environ['EVENTLET_NO_GREENDNS'] = 'yes'  # Отключает багованный DNS резолвер (убирает задержку 30 сек)
+import eventlet
+eventlet.monkey_patch()  # Делает весь код асинхронным
+
 from datetime import datetime
 from flask import Flask, request, redirect, url_for, flash, session, jsonify, render_template_string, \
     send_from_directory
@@ -16,27 +20,32 @@ from werkzeug.security import generate_password_hash, check_password_hash
 # ==========================================
 app = Flask(__name__)
 
-# На Render лучше передавать секретный ключ через переменные окружения
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'super-secret-key-for-youme-12345')
 
-# Подключение к PostgreSQL Aiven с безопасной заменой префикса
+# Получаем ссылку на БД
 db_url = os.environ.get(
     'DATABASE_URL', 
     "postgresql://avnadmin:AVNS_A094KJpWYOSX9t3_eM6@youme-krossmag.l.aivencloud.com:25520/defaultdb?sslmode=require"
 )
+
+# Render иногда ставит префикс postgres://, исправляем
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
+
+# ВАЖНО: Подменяем драйвер на чистый Python (pg8000) для идеальной работы с Eventlet
+if db_url.startswith("postgresql://"):
+    db_url = db_url.replace("postgresql://", "postgresql+pg8000://", 1)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# ОПТИМИЗАЦИЯ ДЛЯ RENDER + AIVEN (Решает проблему огромных задержек)
+# Настройки для поддержания живого соединения с Aiven (Connection Pooling)
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    'pool_size': 10,             # Количество одновременных постоянных соединений
-    'pool_recycle': 280,         # Пересоздавать соединения каждые 280 секунд (до того как Render убьет их за неактивность)
-    'pool_pre_ping': True,       # Быстрая проверка "живо ли соединение" перед выполнением запроса
-    'pool_timeout': 20,          # Максимальное время ожидания свободного соединения
-    'max_overflow': 15           # Дополнительные временные соединения при пиковых нагрузках
+    'pool_size': 10,
+    'pool_recycle': 280,
+    'pool_pre_ping': True,
+    'pool_timeout': 20,
+    'max_overflow': 15
 }
 
 db = SQLAlchemy(app)
@@ -539,7 +548,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 imagePreview: null,
                 typing: {},
 
-                // Профиль
                 showProfileModal: false,
                 isMyProfile: false,
                 editMode: false,
