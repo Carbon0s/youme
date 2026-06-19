@@ -32,7 +32,7 @@ login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 
 # Для продакшена на Render требуется async_mode='eventlet' вместо 'threading'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode=None)
 
 
 # ==========================================
