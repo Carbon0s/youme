@@ -1414,9 +1414,29 @@ def handle_delete_message(data):
 # ==========================================
 # ИНИЦИАЛИЗАЦИЯ И ЗАПУСК
 # ==========================================
+from sqlalchemy import text # Обязательно добавьте этот импорт в начало файла
+
 def init_db():
     with app.app_context():
+        # Создает таблицы, если их нет
         db.create_all()
+
+        # --- ИСПРАВЛЕНИЕ: Добавляем недостающие колонки в таблицу messages ---
+        try:
+            # Используем ALTER TABLE, чтобы добавить столбцы, если они еще не существуют
+            db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE;"))
+            db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_edited BOOLEAN DEFAULT FALSE;"))
+            db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS original_text TEXT;"))
+            db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id INTEGER;"))
+            db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded_from_id INTEGER;"))
+            db.session.commit()
+            print("База данных синхронизирована (колонки добавлены, если их не было).")
+        except Exception as e:
+            db.session.rollback()
+            print(f"Ошибка при обновлении структуры базы данных: {e}")
+        # ----------------------------------------------------------------------
+
+        # Проверка и создание администратора
         if not User.query.filter_by(username='admin').first():
             admin = User(
                 username='admin', password='admin',
@@ -1427,6 +1447,7 @@ def init_db():
             db.session.add(admin)
             db.session.commit()
 
+# Вызов функции
 init_db()
 
 if __name__ == '__main__':
