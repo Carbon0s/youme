@@ -41,6 +41,9 @@ socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins="*")
 # ==========================================
 # ВСПОМОГАТЕЛЬНАЯ ЛОГИКА И ПРАВА (SUDO)
 # ==========================================
+def now_msk():
+    return datetime.utcnow() + timedelta(hours=3)
+
 def format_bday(bd_str):
     if not bd_str or "." not in bd_str:
         return "Не указана"
@@ -64,6 +67,19 @@ def can_see_edits():
 def can_see_chatting():
     return has_admin_priv() or current_user.perm_see_chatting_with
 
+def can_ban_users():
+    return has_admin_priv() or current_user.perm_ban_users
+
+def check_user_banned(u):
+    if not u or not u.banned_until:
+        return False, None, False
+    if u.banned_until > now_msk():
+        is_perm = u.banned_until.year >= 9999
+        return True, u.banned_until, is_perm
+    u.banned_until = None
+    db.session.commit()
+    return False, None, False
+
 # ==========================================
 # МОДЕЛИ БАЗЫ ДАННЫХ
 # ==========================================
@@ -80,7 +96,7 @@ class User(UserMixin, db.Model):
     phone = db.Column(db.String(20), nullable=True)
     about_me = db.Column(db.Text, nullable=True)
     birth_date = db.Column(db.String(20), nullable=True)
-    last_seen = db.Column(db.DateTime, default=datetime.utcnow)
+    last_seen = db.Column(db.DateTime, default=now_msk)
 
     show_phone = db.Column(db.Boolean, default=False)
     show_about = db.Column(db.Boolean, default=True)
@@ -92,22 +108,25 @@ class User(UserMixin, db.Model):
     perm_edit_history = db.Column(db.Boolean, default=False)
     perm_deleted_messages = db.Column(db.Boolean, default=False)
     perm_see_chatting_with = db.Column(db.Boolean, default=False)
+    perm_ban_users = db.Column(db.Boolean, default=False)
+
+    banned_until = db.Column(db.DateTime, nullable=True)
 
     promoted_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=now_msk)
 
 class Contact(db.Model):
     __tablename__ = 'contacts'
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     contact_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    added_at = db.Column(db.DateTime, default=datetime.utcnow)
+    added_at = db.Column(db.DateTime, default=now_msk)
 
 class Chat(db.Model):
     __tablename__ = 'chats'
     id = db.Column(db.Integer, primary_key=True)
     type = db.Column(db.String(20), default='private')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=now_msk)
 
 class ChatParticipant(db.Model):
     __tablename__ = 'chat_participants'
@@ -122,7 +141,8 @@ class Message(db.Model):
     sender_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     text = db.Column(db.Text, nullable=True)
     image_base64 = db.Column(db.Text, nullable=True)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    voice_base64 = db.Column(db.Text, nullable=True)
+    timestamp = db.Column(db.DateTime, default=now_msk)
     is_read = db.Column(db.Boolean, default=False)
     
     is_deleted = db.Column(db.Boolean, default=False)
@@ -178,6 +198,38 @@ BASE_HTML_HEAD = """
         <a href="{{ url_for('revert_impersonate') }}" class="bg-white text-red-600 px-2 py-1 rounded-md hover:bg-gray-200 transition">Вернуться</a>
     </div>
     {% endif %}
+"""
+
+BANNED_TEMPLATE = BASE_HTML_HEAD + """
+    <div class="flex-1 flex items-center justify-center bg-gray-900 px-4">
+        <div class="bg-gray-800 border border-red-950 p-8 rounded-2xl shadow-2xl max-w-md w-full flex flex-col items-center text-center">
+            
+            <div class="w-20 h-20 rounded-full border-4 border-red-600 bg-black flex items-center justify-center shadow-lg mb-6">
+                <span class="text-white font-black text-4xl leading-none">!</span>
+            </div>
+
+            <h2 class="text-2xl font-bold text-red-500 mb-4">Вход ограничен</h2>
+
+            <p class="text-gray-200 text-base md:text-lg mb-6 font-medium leading-relaxed">
+                {% if is_permanent %}
+                    Вы были заблокированы навсегда
+                {% else %}
+                    Вы были заблокированы до<br>
+                    <span class="font-mono font-bold text-red-400 text-lg block mt-2">{{ ban_date_str }}</span>
+                {% endif %}
+            </p>
+
+            <div class="w-full border-t border-gray-700/80 pt-4 mt-2">
+                <span class="text-xs text-gray-400 tracking-wider">Администрация You`Me</span>
+            </div>
+
+            <div class="mt-6">
+                <a href="{{ url_for('logout') }}" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-4 py-2 rounded-full transition">Выйти из аккаунта</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
 """
 
 LOGIN_TEMPLATE = BASE_HTML_HEAD + """
@@ -243,7 +295,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 </div>
 
                 <div class="flex gap-2">
-                    {% if current_user.is_admin or current_user.is_moderator or session.get('original_admin_id') %}
+                    {% if current_user.is_admin or current_user.is_moderator or current_user.perm_ban_users or session.get('original_admin_id') %}
                     <a href="{{ url_for('admin_panel') }}" class="p-1 text-gray-400 hover:text-white" title="Панель Управления">
                         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.427.738-3.2 2.23-2.47z"></path></svg>
                     </a>
@@ -291,13 +343,13 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                         <img x-show="chat.partner_avatar" :src="chat.partner_avatar" class="w-full h-full object-cover">
                                         <span x-show="!chat.partner_avatar" x-text="chat.partner_name[0]"></span>
                                     </div>
-                                    <div x-show="chat.is_online" class="absolute bottom-0 right-0 w-3.5 h-3.5 bg-blue-500 border-2 border-gray-900 rounded-full z-10"></div>
+                                    <div x-show="chat.is_online && !chat.partner_is_banned" class="absolute bottom-0 right-0 w-3.5 h-3.5 bg-blue-500 border-2 border-gray-900 rounded-full z-10"></div>
                                 </div>
 
                                 <div class="flex-1 min-w-0">
                                     <div class="flex justify-between items-center mb-1">
                                         <div class="text-sm font-semibold truncate flex items-center gap-2 pr-2">
-                                            <span class="truncate" x-text="chat.partner_name"></span>
+                                            <span class="truncate" :class="chat.partner_is_banned ? 'line-through text-red-500' : ''" x-text="chat.partner_name"></span>
                                             <template x-if="chat.partner_is_admin"><span class="admin-badge flex-shrink-0">Admin</span></template>
                                             <template x-if="chat.partner_is_moderator"><span class="mod-badge flex-shrink-0">Moderator</span></template>
                                         </div>
@@ -338,13 +390,18 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                 </div>
                                 <div class="flex flex-col min-w-0">
                                     <div class="flex items-center gap-2 min-w-0">
-                                        <div class="text-white font-semibold text-sm md:text-base truncate" x-text="currentChat.partner_name"></div>
+                                        <div class="text-white font-semibold text-sm md:text-base truncate flex items-center">
+                                            <span x-text="currentChat.partner_name"></span>
+                                            <template x-if="currentChat.partner_is_banned">
+                                                <span class="text-red-700 font-bold ml-1 flex-shrink-0"> — Пользователь Заблокирован</span>
+                                            </template>
+                                        </div>
                                         <template x-if="currentChat.partner_is_admin"><span class="admin-badge hidden md:inline-block">Admin</span></template>
                                         <template x-if="currentChat.partner_is_moderator"><span class="mod-badge hidden md:inline-block">Moderator</span></template>
                                     </div>
                                     <div class="text-[11px] md:text-xs flex items-center gap-1 truncate">
-                                        <span :class="typing[currentChat.chat_id] ? 'text-blue-400 italic animate-pulse' : (currentChat.custom_status ? 'text-blue-300 font-semibold' : (currentChat.is_online ? 'text-blue-400' : 'text-gray-400'))" 
-                                              x-text="typing[currentChat.chat_id] ? 'печатает...' : (currentChat.custom_status ? currentChat.custom_status : (currentChat.is_online ? 'в сети' : 'был(а) ' + (currentChat.last_seen || 'недавно')))"></span>
+                                        <span :class="currentChat.partner_is_banned ? 'text-red-700 font-semibold' : (typing[currentChat.chat_id] ? 'text-blue-400 italic animate-pulse' : (currentChat.custom_status ? 'text-blue-300 font-semibold' : (currentChat.is_online ? 'text-blue-400' : 'text-gray-400')))" 
+                                              x-text="currentChat.partner_is_banned ? 'заблокирован' : (typing[currentChat.chat_id] ? 'печатает...' : (currentChat.custom_status ? currentChat.custom_status : (currentChat.is_online ? 'в сети' : 'был(а) ' + (currentChat.last_seen || 'недавно'))))"></span>
                                     </div>
                                 </div>
                             </div>
@@ -353,10 +410,10 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
                     <div class="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 max-h-full" id="messagesBox">
                         <template x-for="msg in messages" :key="msg.id">
-                            <div class="flex w-full" :class="msg.sender_id === {{ current_user.id }} ? 'justify-end' : 'justify-start'">
+                            <div class="flex w-full" :class="msg.sender_id === myId ? 'justify-end' : 'justify-start'">
                                 
                                 <div class="max-w-[85%] md:max-w-[70%] rounded-2xl px-3 py-2 md:px-4 shadow-md relative group flex flex-col select-text"
-                                     :class="msg.is_deleted ? 'bg-red-950/40 border border-red-900 text-red-200 rounded-sm' : (msg.sender_id === {{ current_user.id }} ? 'bg-blue-600 text-white rounded-tr-sm' : 'bg-gray-800 text-gray-100 rounded-tl-sm')"
+                                     :class="msg.is_deleted ? 'bg-red-950/40 border border-red-900 text-red-200 rounded-sm' : (msg.sender_id === myId ? 'bg-blue-600 text-white rounded-tr-sm' : 'bg-gray-800 text-gray-100 rounded-tl-sm')"
                                      @contextmenu.prevent="openContextMenu($event, msg, false)"
                                      @touchstart="handleTouchStart($event, msg)"
                                      @touchend="handleTouchEnd()"
@@ -379,9 +436,17 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                         <img :src="msg.image_base64" class="rounded-lg mb-2 max-w-full h-auto cursor-pointer">
                                     </template>
 
-                                    <div class="text-[14px] md:text-[15px] leading-relaxed break-words" x-text="msg.text"></div>
+                                    <template x-if="msg.voice_base64">
+                                        <div class="my-1">
+                                            <audio controls :src="msg.voice_base64" class="max-w-[210px] md:max-w-[280px] h-9 outline-none"></audio>
+                                        </div>
+                                    </template>
 
-                                    <div class="text-[10px] text-right mt-1 flex items-center justify-end gap-1 opacity-70" :class="msg.is_deleted ? 'text-red-400' : (msg.sender_id === {{ current_user.id }} ? 'text-blue-200' : 'text-gray-400')">
+                                    <template x-if="msg.text">
+                                        <div class="text-[14px] md:text-[15px] leading-relaxed break-words" x-text="msg.text"></div>
+                                    </template>
+
+                                    <div class="text-[10px] text-right mt-1 flex items-center justify-end gap-1 opacity-70" :class="msg.is_deleted ? 'text-red-400' : (msg.sender_id === myId ? 'text-blue-200' : 'text-gray-400')">
                                         <template x-if="msg.is_edited && !msg.is_deleted">
                                             <span class="text-[9px] italic mr-1 text-gray-300">(изменено)</span>
                                         </template>
@@ -389,7 +454,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                             <span class="text-[9px] font-bold text-red-400 mr-1">(удалено)</span>
                                         </template>
                                         <span x-text="msg.time"></span>
-                                        <template x-if="msg.sender_id === {{ current_user.id }} && !msg.is_deleted">
+                                        <template x-if="msg.sender_id === myId && !msg.is_deleted">
                                             <span class="font-bold text-[11px]" :class="msg.is_read ? 'text-[#4da3ff]' : 'text-blue-200'" x-text="msg.is_read ? '✓✓' : '✓'"></span>
                                         </template>
                                     </div>
@@ -403,7 +468,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         <div x-show="replyToMessage" style="display:none;" class="bg-gray-800/80 p-2 px-4 flex justify-between items-center text-xs text-gray-300 border-b border-gray-700/50">
                             <div class="truncate flex items-center gap-1">
                                 <span class="text-blue-400 font-bold uppercase text-[10px]">Ответить на:</span>
-                                <span class="italic truncate max-w-xs" x-text="replyToMessage ? (replyToMessage.text || '[Фото]') : ''"></span>
+                                <span class="italic truncate max-w-xs" x-text="replyToMessage ? (replyToMessage.voice_base64 ? '[Голосовое]' : (replyToMessage.text || '[Фото]')) : ''"></span>
                             </div>
                             <button @click="replyToMessage = null" class="text-gray-400 hover:text-white font-bold text-sm px-1">✕</button>
                         </div>
@@ -424,16 +489,48 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         </div>
 
                         <div class="p-2 md:p-4 flex items-center gap-2 md:gap-3 w-full max-w-4xl mx-auto">
-                            <label class="cursor-pointer p-2 text-gray-400 hover:text-blue-500 transition flex-shrink-0">
-                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
-                                <input type="file" class="hidden" accept="image/*" @change="handleImageSelect">
-                            </label>
+                            
+                            <template x-if="currentChat.partner_is_banned">
+                                <div class="flex-1 bg-gray-800/60 text-red-700 font-bold text-sm md:text-base rounded-full px-4 py-2 md:py-3 flex items-center border border-red-900/30 select-none">
+                                    Пользователь Заблокирован
+                                </div>
+                            </template>
+                            <template x-if="currentChat.partner_is_banned">
+                                <button disabled class="flex-shrink-0 bg-blue-600/20 text-red-700 font-black rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center cursor-not-allowed border border-red-900/30">
+                                    <span class="text-xl">!</span>
+                                </button>
+                            </template>
 
-                            <input type="text" x-model="newMessage" @keydown.enter="sendMessage()" @input="sendTyping()" placeholder="Сообщение..." class="flex-1 min-w-0 bg-gray-800 text-sm md:text-base text-white rounded-full px-4 py-2 md:py-3 focus:outline-none focus:ring-1 focus:ring-blue-500 shadow-inner">
+                            <template x-if="!currentChat.partner_is_banned && !isRecording">
+                                <label class="cursor-pointer p-2 text-gray-400 hover:text-blue-500 transition flex-shrink-0">
+                                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
+                                    <input type="file" class="hidden" accept="image/*" @change="handleImageSelect">
+                                </label>
+                            </template>
 
-                            <button @click="sendMessage()" class="flex-shrink-0 bg-blue-600 hover:bg-blue-500 text-white rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center transition shadow-lg" :disabled="!newMessage.trim() && !imagePreview">
-                                <svg class="w-4 h-4 md:w-5 md:h-5 ml-1 transform -rotate-45" fill="currentColor" viewBox="0 0 20 20"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"></path></svg>
-                            </button>
+                            <template x-if="!currentChat.partner_is_banned && !isRecording">
+                                <input type="text" x-model="newMessage" @keydown.enter="sendMessage()" @input="sendTyping()" placeholder="Сообщение..." class="flex-1 min-w-0 bg-gray-800 text-sm md:text-base text-white rounded-full px-4 py-2 md:py-3 focus:outline-none focus:ring-1 focus:ring-blue-500 shadow-inner">
+                            </template>
+
+                            <template x-if="!currentChat.partner_is_banned && isRecording">
+                                <div class="flex-1 bg-red-950/60 border border-red-800 text-red-200 rounded-full px-4 py-2 md:py-3 flex items-center justify-center gap-2 font-mono font-bold animate-pulse">
+                                    <div class="w-3 h-3 rounded-full bg-red-500"></div>
+                                    <span x-text="formatTimer(recordTimer)"></span>
+                                </div>
+                            </template>
+
+                            <template x-if="!currentChat.partner_is_banned && !isRecording">
+                                <button @click="sendMessage()" class="flex-shrink-0 bg-blue-600 hover:bg-blue-500 text-white rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center transition shadow-lg" :disabled="!newMessage.trim() && !imagePreview">
+                                    <svg class="w-4 h-4 md:w-5 md:h-5 ml-1 transform -rotate-45" fill="currentColor" viewBox="0 0 20 20"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"></path></svg>
+                                </button>
+                            </template>
+
+                            <template x-if="!currentChat.partner_is_banned">
+                                <button type="button" @click="toggleVoiceRecord()" :class="isRecording ? 'bg-red-600 text-white animate-pulse' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'" class="flex-shrink-0 rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center transition shadow-lg">
+                                    <svg class="w-4 h-4 md:w-5 md:h-5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z" clip-rule="evenodd"></path></svg>
+                                </button>
+                            </template>
+
                         </div>
                     </div>
                 </div>
@@ -450,7 +547,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                  <span>Ответить</span>
              </button>
              
-             <template x-if="contextMenu.msg && contextMenu.msg.sender_id === myId && !contextMenu.msg.is_deleted">
+             <template x-if="contextMenu.msg && contextMenu.msg.sender_id === myId && !contextMenu.msg.is_deleted && !contextMenu.msg.voice_base64">
                  <button @click="actionEdit()" class="w-full text-left px-4 py-2 hover:bg-gray-700 flex items-center gap-2 text-gray-200">
                      <span>Изменить</span>
                  </button>
@@ -506,7 +603,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
         </div>
 
         <div x-show="showProfileModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" @click.self="closeProfileModal()">
-            <div class="bg-[#242f3d] w-full max-w-sm rounded-lg shadow-2xl overflow-hidden flex flex-col relative text-gray-100">
+             <div class="bg-[#242f3d] w-full max-w-sm rounded-lg shadow-2xl overflow-hidden flex flex-col relative text-gray-100">
 
                 <div class="absolute top-4 right-4 flex gap-4 z-20">
                     <button x-show="isMyProfile" @click="editMode = true" class="text-white hover:text-blue-400 drop-shadow-md">
@@ -525,7 +622,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         </div>
                         <div class="text-center mt-4 px-4">
                             <div class="text-lg md:text-xl font-bold flex items-center justify-center gap-2 flex-wrap">
-                                 <span x-text="viewProfileData.first_name + ' ' + (viewProfileData.last_name || '')"></span>
+                                <span x-text="viewProfileData.first_name + ' ' + (viewProfileData.last_name || '')"></span>
                                 <template x-if="viewProfileData.is_admin"><span class="admin-badge">Admin</span></template>
                                 <template x-if="viewProfileData.is_moderator"><span class="mod-badge">Moderator</span></template>
                             </div>
@@ -555,10 +652,10 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         </div>
 
                         <template x-if="viewProfileData.formatted_bday">
-                            <div class="border-b border-gray-700 pb-2">
+                             <div class="border-b border-gray-700 pb-2">
                                 <div class="text-[14px] md:text-[15px]" x-text="viewProfileData.formatted_bday"></div>
                                 <div class="text-[10px] md:text-xs text-gray-500">День рождения</div>
-                            </div>
+                             </div>
                         </template>
 
                         <template x-if="!isMyProfile && !viewProfileData.phone && !viewProfileData.about_me && !viewProfileData.formatted_bday">
@@ -658,6 +755,12 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 imagePreview: null,
                 typing: {},
 
+                isRecording: false,
+                mediaRecorder: null,
+                audioChunks: [],
+                recordTimer: 0,
+                recordInterval: null,
+
                 contextMenu: { show: false, x: 0, y: 0, msg: null },
                 longPressTimer: null,
                 touchX: 0,
@@ -681,6 +784,9 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     this.socket = io();
                     this.socket.on('connect', () => {
                         this.loadChats();
+                    });
+                    this.socket.on('force_logout', () => {
+                        window.location.href = '/logout';
                     });
                     this.socket.on('new_message', (data) => {
                         if (this.currentChat && this.currentChat.chat_id === data.chat_id) {
@@ -729,6 +835,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                              if(data.last_seen) this.viewProfileData.last_seen = data.last_seen;
                              this.viewProfileData.custom_status = customStatus;
                          }
+                         this.loadChats();
                     });
                 },
 
@@ -736,6 +843,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     this.currentChat = null;
                     this.replyToMessage = null;
                     this.editMessage = null;
+                    this.stopRecording();
                     this.socket.emit('close_chat');
                 },
 
@@ -789,6 +897,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         chat_id: chatId,
                         text: this.forwardMessageTarget.text,
                         image_base64: this.forwardMessageTarget.image_base64,
+                        voice_base64: this.forwardMessageTarget.voice_base64,
                         forwarded_from_id: this.forwardMessageTarget.sender_id
                     });
                     this.forwardModal = false;
@@ -876,6 +985,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     this.currentChat = chat;
                     this.replyToMessage = null;
                     this.editMessage = null;
+                    this.stopRecording();
                     this.socket.emit('open_chat', { partner_id: chat.partner_id });
                     await this.reloadCurrentMessages();
                 },
@@ -895,7 +1005,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 },
                 sendMessage() {
                     if (!this.newMessage.trim() && !this.imagePreview) return;
-                    
                     if (this.editMessage) {
                         this.socket.emit('edit_message', {
                             message_id: this.editMessage.id,
@@ -916,6 +1025,70 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     this.newMessage = '';
                     this.imagePreview = null;
                 },
+
+                async toggleVoiceRecord() {
+                    if (!this.isRecording) {
+                        await this.startRecording();
+                    } else {
+                        await this.stopRecording();
+                    }
+                },
+                async startRecording() {
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        this.mediaRecorder = new MediaRecorder(stream);
+                        this.audioChunks = [];
+                        this.recordTimer = 0;
+                        this.isRecording = true;
+
+                        this.recordInterval = setInterval(() => {
+                            this.recordTimer++;
+                        }, 1000);
+
+                        this.mediaRecorder.ondataavailable = (e) => {
+                            if (e.data.size > 0) {
+                                this.audioChunks.push(e.data);
+                            }
+                        };
+
+                        this.mediaRecorder.onstop = () => {
+                            clearInterval(this.recordInterval);
+                            this.isRecording = false;
+
+                            const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
+                            const reader = new FileReader();
+                            reader.readAsDataURL(audioBlob);
+                            reader.onloadend = () => {
+                                const base64Audio = reader.result;
+                                const payload = {
+                                    chat_id: this.currentChat.chat_id,
+                                    voice_base64: base64Audio,
+                                    reply_to_id: this.replyToMessage ? this.replyToMessage.id : null
+                                };
+                                this.socket.emit('send_message', payload);
+                                this.replyToMessage = null;
+                            };
+
+                            stream.getTracks().forEach(track => track.stop());
+                        };
+
+                        this.mediaRecorder.start();
+                    } catch (err) {
+                        alert('Не удалось получить доступ к микрофону: ' + err.message);
+                        this.isRecording = false;
+                    }
+                },
+                stopRecording() {
+                    if (this.mediaRecorder && this.isRecording) {
+                        this.mediaRecorder.stop();
+                    }
+                },
+                formatTimer(seconds) {
+                    const mins = Math.floor(seconds / 60).toString().padStart(2, '0');
+                    const secs = (seconds % 60).toString().padStart(2, '0');
+                    return `${mins}:${secs}`;
+                },
+
                 sendTyping() {
                     if (this.currentChat) {
                         this.socket.emit('typing', { chat_id: this.currentChat.chat_id });
@@ -950,10 +1123,10 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
         {% endwith %}
 
         <div class="bg-gray-800 rounded-xl shadow-xl border border-gray-700 overflow-x-auto">
-            <table class="w-full text-left border-collapse min-w-[700px]">
+            <table class="w-full text-left border-collapse min-w-[750px]">
                 <thead>
                     <tr class="bg-gray-900 border-b border-gray-700 text-gray-400 uppercase text-[10px] md:text-xs">
-                        <th class="p-3 md:p-4">ID</th>
+                         <th class="p-3 md:p-4">ID</th>
                         <th class="p-3 md:p-4">Пользователь / Ник</th>
                         <th class="p-3 md:p-4">Статус</th>
                         <th class="p-3 md:p-4 text-right">Действия</th>
@@ -962,38 +1135,48 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                 <tbody class="text-xs md:text-sm">
                     {% for u in users %}
                     <tr class="border-b border-gray-700 hover:bg-gray-750 transition">
-                        <td class="p-3 md:p-4 text-gray-500">#{{ u.id }}</td>
+                         <td class="p-3 md:p-4 text-gray-500">#{{ u.id }}</td>
                         <td class="p-3 md:p-4">
                             <div class="font-semibold text-white flex items-center gap-2">
-                                {{ u.first_name }} {{ u.last_name or '' }}
+                                 {{ u.first_name }} {{ u.last_name or '' }}
                                 {% if u.is_admin %}<span class="admin-badge">Admin</span>{% endif %}
                                 {% if u.is_moderator %}<span class="mod-badge">Moderator</span>{% endif %}
+                                {% if u.banned_until %}<span class="bg-red-950 border border-red-700 text-red-400 px-1.5 py-0.5 rounded text-[10px] font-bold">Banned</span>{% endif %}
                             </div>
                             <div class="text-[10px] md:text-xs text-blue-400">@{{ u.username }}</div>
                         </td>
                         <td class="p-3 md:p-4 text-gray-500">
                             {% if u.id in connected %} <span class="text-blue-500 font-bold">В сети</span> 
                             {% else %} Был(а) {{ u.last_seen.strftime('%H:%M %d.%m') if u.last_seen else '-' }}
-                            {% endif %}
+                             {% endif %}
                         </td>
                         <td class="p-3 md:p-4 text-right space-x-1 md:space-x-2">
                             <button @click="openHistory({{ u.id }}, '{{ u.first_name }} {{ u.last_name or '' }}')" class="inline-block bg-indigo-900/50 hover:bg-indigo-800 text-indigo-300 border border-indigo-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">Список общения</button>
                             
+                            {% if can_ban_users %}
+                                {% if u.id != current_user.id and not u.is_admin %}
+                                    <button @click="openBanModal({{ u.id }}, '{{ u.first_name }} {{ u.last_name or '' }}', '{{ 'forever' if u.banned_until and u.banned_until.year >= 9999 else (u.banned_until.strftime('%Y-%m-%dT%H:%M') if u.banned_until else '') }}')" 
+                                            class="inline-block bg-red-900/50 hover:bg-red-800 text-red-300 border border-red-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">
+                                        {{ 'Разблокировать' if u.banned_until else 'Блокировка' }}
+                                    </button>
+                                {% endif %}
+                            {% endif %}
+
                             {% if has_admin_priv %}
                                 {% if u.id != current_user.id %}
-                                    <button @click="openPerms({ id: {{ u.id }}, is_admin: {{ 'true' if u.is_admin else 'false' }}, is_moderator: {{ 'true' if u.is_moderator else 'false' }}, perm_edit_history: {{ 'true' if u.perm_edit_history else 'false' }}, perm_deleted_messages: {{ 'true' if u.perm_deleted_messages else 'false' }}, perm_see_chatting_with: {{ 'true' if u.perm_see_chatting_with else 'false' }} })" class="inline-block bg-green-900/50 hover:bg-green-800 text-green-300 border border-green-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">Управление правами</button>
+                                    <button @click="openPerms({ id: {{ u.id }}, is_admin: {{ 'true' if u.is_admin else 'false' }}, is_moderator: {{ 'true' if u.is_moderator else 'false' }}, perm_edit_history: {{ 'true' if u.perm_edit_history else 'false' }}, perm_deleted_messages: {{ 'true' if u.perm_deleted_messages else 'false' }}, perm_see_chatting_with: {{ 'true' if u.perm_see_chatting_with else 'false' }}, perm_ban_users: {{ 'true' if u.perm_ban_users else 'false' }} })" class="inline-block bg-green-900/50 hover:bg-green-800 text-green-300 border border-green-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">Управление правами</button>
                                     
                                     {% if current_user.promoted_by_id != u.id %}
-                                        <a href="{{ url_for('impersonate', target_id=u.id) }}" class="inline-block bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition shadow">Войти как</a>
+                                         <a href="{{ url_for('impersonate', target_id=u.id) }}" class="inline-block bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition shadow">Войти как</a>
                                     {% endif %}
                                 {% else %}
                                     <span class="text-gray-600 text-[10px] md:text-xs italic">Это вы</span>
                                 {% endif %}
-                            {% endif %}
+                             {% endif %}
                         </td>
                     </tr>
                     {% endfor %}
-                </tbody>
+                 </tbody>
             </table>
         </div>
 
@@ -1011,6 +1194,10 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                         <span class="text-sm font-medium text-green-400">sudo moderate</span>
                     </label>
                     <label class="flex items-center gap-3 cursor-pointer">
+                        <input type="checkbox" x-model="permsUser.perm_ban_users" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded">
+                        <span class="text-sm font-medium text-purple-400">sudo блокировка</span>
+                    </label>
+                    <label class="flex items-center gap-3 cursor-pointer">
                         <input type="checkbox" x-model="permsUser.perm_edit_history" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded">
                         <span class="text-sm font-medium text-gray-300">sudo история изменений</span>
                     </label>
@@ -1020,13 +1207,45 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                     </label>
                     <label class="flex items-center gap-3 cursor-pointer">
                         <input type="checkbox" x-model="permsUser.perm_see_chatting_with" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded">
-                        <span class="text-sm font-medium text-gray-300">sudo с кем человек общается</span>
-                    </label>
+                        <span class="text-sm font-medium text-gray-300">sudo с кем общается</span>
+                     </label>
                 </div>
 
                 <div class="flex gap-2">
                     <button @click="savePerms()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 rounded transition">Сохранить</button>
                     <button @click="showPermsModal = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 rounded transition">Отмена</button>
+                </div>
+            </div>
+        </div>
+
+        <div x-show="showBanModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="showBanModal = false">
+            <div class="bg-[#1e293b] p-6 rounded-xl border border-red-700 w-full max-w-sm shadow-2xl">
+                <h3 class="text-red-400 font-bold text-lg mb-4 border-b border-gray-700 pb-2">Блокировка: <span class="text-white" x-text="banTargetName"></span></h3>
+                
+                <div class="space-y-4 mb-6">
+                    <div>
+                        <label class="flex items-center gap-2 cursor-pointer mb-2">
+                            <input type="radio" name="bmode" value="forever" x-model="banMode" class="text-red-600 bg-gray-700 border-gray-600">
+                            <span class="text-sm text-white font-semibold">Вечная блокировка</span>
+                        </label>
+                        <label class="flex items-center gap-2 cursor-pointer">
+                            <input type="radio" name="bmode" value="temporary" x-model="banMode" class="text-red-600 bg-gray-700 border-gray-600">
+                            <span class="text-sm text-white font-semibold">Свое время блокировки</span>
+                        </label>
+                    </div>
+
+                    <div x-show="banMode === 'temporary'" class="pt-2">
+                        <label class="text-xs text-gray-400 block mb-1">Разблокировать в (МСК):</label>
+                        <input type="datetime-local" x-model="banCustomDate" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white text-sm focus:ring-1 focus:ring-red-500">
+                    </div>
+                </div>
+
+                <div class="flex flex-col gap-2">
+                    <div class="flex gap-2">
+                        <button @click="executeBan()" class="flex-1 bg-red-600 hover:bg-red-500 text-white font-bold py-2 rounded transition">Применить</button>
+                        <button @click="showBanModal = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 rounded transition">Отмена</button>
+                    </div>
+                    <button @click="executeUnban()" class="w-full bg-green-700/60 hover:bg-green-700 text-green-200 font-bold py-1.5 rounded text-xs transition mt-2">Снять блокировку</button>
                 </div>
             </div>
         </div>
@@ -1040,16 +1259,16 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                         <div class="text-gray-500 text-sm italic text-center py-4">Нет активности за последние сутки.</div>
                     </template>
                     <div class="space-y-2">
-                        <template x-for="item in historyData" :key="item.username">
+                         <template x-for="item in historyData" :key="item.username">
                             <div class="bg-gray-800 p-3 rounded border border-gray-700 flex justify-between items-center">
                                 <div>
-                                    <div class="text-sm font-bold text-white" x-text="item.name"></div>
+                                     <div class="text-sm font-bold text-white" x-text="item.name"></div>
                                     <div class="text-xs text-blue-400" x-text="'@' + item.username"></div>
                                 </div>
                                 <div class="text-xs font-mono text-gray-400 bg-gray-900 px-2 py-1 rounded" x-text="item.time_range"></div>
                             </div>
                         </template>
-                    </div>
+                     </div>
                 </div>
 
                 <button @click="showHistoryModal = false" class="w-full bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 rounded transition">Закрыть</button>
@@ -1060,13 +1279,18 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
 
     <script>
         function adminApp() {
-            return {
+             return {
                 showPermsModal: false,
                 permsUser: {},
-                
                 showHistoryModal: false,
                 historyUserName: '',
                 historyData: [],
+
+                showBanModal: false,
+                banTargetId: null,
+                banTargetName: '',
+                banMode: 'temporary',
+                banCustomDate: '',
 
                 openPerms(userData) {
                     this.permsUser = userData;
@@ -1085,6 +1309,39 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                     const res = await fetch('/api/admin/history_24h/' + userId);
                     this.historyData = await res.json();
                     this.showHistoryModal = true;
+                },
+
+                openBanModal(id, name, currentBan) {
+                    this.banTargetId = id;
+                    this.banTargetName = name;
+                    if (currentBan === 'forever') {
+                        this.banMode = 'forever';
+                    } else if (currentBan !== '') {
+                        this.banMode = 'temporary';
+                        this.banCustomDate = currentBan;
+                    } else {
+                        this.banMode = 'temporary';
+                        let tomorrow = new Date(Date.now() + 86400000);
+                        let tzoffset = tomorrow.getTimezoneOffset() * 60000;
+                        this.banCustomDate = new Date(tomorrow - tzoffset).toISOString().slice(0, 16);
+                    }
+                    this.showBanModal = true;
+                },
+                async executeBan() {
+                    await fetch('/api/admin/ban/' + this.banTargetId, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ action: 'ban', type: this.banMode, until: this.banCustomDate })
+                    });
+                    location.reload();
+                },
+                async executeUnban() {
+                    await fetch('/api/admin/ban/' + this.banTargetId, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ action: 'unban' })
+                    });
+                    location.reload();
                 }
             }
         }
@@ -1120,10 +1377,11 @@ def login():
                 password=password,
                 first_name=request.form.get('first_name'),
                 last_name=request.form.get('last_name') or None,
-                last_seen=datetime.utcnow()
+                last_seen=now_msk()
             )
             db.session.add(new_user)
             db.session.commit()
+            
             login_user(new_user)
             return redirect(url_for('index'))
 
@@ -1133,6 +1391,7 @@ def login():
             if user:
                 login_user(user)
                 return redirect(url_for('index'))
+ 
             flash('Неверный логин или пароль')
 
     return render_template_string(LOGIN_TEMPLATE)
@@ -1141,7 +1400,7 @@ def login():
 @login_required
 def logout():
     session.pop('original_admin_id', None)
-    current_user.last_seen = datetime.utcnow()
+    current_user.last_seen = now_msk()
     db.session.commit()
     logout_user()
     return redirect(url_for('login'))
@@ -1149,6 +1408,10 @@ def logout():
 @app.route('/')
 @login_required
 def index():
+    banned, until_dt, is_perm = check_user_banned(current_user)
+    if banned:
+        ban_str = until_dt.strftime('%dд. %mмес. %Yг. %H:%M:%S') if until_dt else ""
+        return render_template_string(BANNED_TEMPLATE, is_permanent=is_perm, ban_date_str=ban_str)
     return render_template_string(APP_TEMPLATE)
 
 # ==========================================
@@ -1216,6 +1479,7 @@ def my_profile():
         'can_see_deleted': can_see_deleted(),
         'can_see_edits': can_see_edits(),
         'perm_see_chatting_with': can_see_chatting(),
+        'can_ban_users': can_ban_users(),
         'is_online': True
     })
 
@@ -1271,6 +1535,14 @@ def get_chats():
             p = User.query.get(active_chat_views[partner.id])
             if p: custom_status = f"общается с: {p.first_name} {p.last_name or ''}"
 
+        partner_banned, _, _ = check_user_banned(partner)
+
+        lmsg_preview = ''
+        if last_msg:
+            if last_msg.voice_base64: lmsg_preview = '[Голосовое]'
+            elif last_msg.text: lmsg_preview = last_msg.text
+            elif last_msg.image_base64: lmsg_preview = '[Фото]'
+
         chats_data.append({
             'chat_id': cid,
             'partner_id': partner.id,
@@ -1278,8 +1550,9 @@ def get_chats():
             'partner_avatar': partner.avatar_url,
             'partner_is_admin': partner.is_admin,
             'partner_is_moderator': partner.is_moderator,
+            'partner_is_banned': partner_banned,
             'custom_status': custom_status,
-            'last_message': last_msg.text if last_msg else ('[Фото]' if last_msg and last_msg.image_base64 else ''),
+            'last_message': lmsg_preview,
             'last_time': last_msg.timestamp.strftime('%H:%M') if last_msg else '',
             'is_online': partner.id in connected_users,
             'last_seen': partner.last_seen.strftime('%H:%M') if partner.last_seen else ''
@@ -1357,7 +1630,10 @@ def get_messages(chat_id):
         reply_text = ""
         if m.reply_to_id:
             rm = Message.query.get(m.reply_to_id)
-            if rm: reply_text = (rm.text[:25] + "...") if (rm.text and len(rm.text) > 25) else (rm.text or "[Фото]")
+            if rm:
+                if rm.voice_base64: reply_text = "[Голосовое]"
+                elif rm.text: reply_text = (rm.text[:25] + "...") if len(rm.text) > 25 else rm.text
+                else: reply_text = "[Фото]"
 
         fwd_name = ""
         if m.forwarded_from_id:
@@ -1366,7 +1642,8 @@ def get_messages(chat_id):
 
         result.append({
             'id': m.id, 'sender_id': m.sender_id, 'text': m.text,
-            'image_base64': m.image_base64, 'time': m.timestamp.strftime('%H:%M'),
+            'image_base64': m.image_base64, 'voice_base64': m.voice_base64,
+            'time': m.timestamp.strftime('%H:%M'),
             'is_read': m.is_read, 'is_deleted': m.is_deleted, 'is_edited': m.is_edited,
             'original_text': m.original_text if see_edits else None,
             'reply_to_id': m.reply_to_id, 'reply_text': reply_text,
@@ -1380,11 +1657,11 @@ def get_messages(chat_id):
 @app.route('/admin')
 @login_required
 def admin_panel():
-    if not (has_admin_priv() or current_user.is_moderator):
+    if not (has_admin_priv() or current_user.is_moderator or current_user.perm_ban_users):
         flash("Доступ запрещен")
         return redirect(url_for('index'))
     users = User.query.order_by(User.id.desc()).all()
-    return render_template_string(ADMIN_TEMPLATE, users=users, connected=connected_users, has_admin_priv=has_admin_priv())
+    return render_template_string(ADMIN_TEMPLATE, users=users, connected=connected_users, has_admin_priv=has_admin_priv(), can_ban_users=can_ban_users())
 
 @app.route('/api/admin/permissions/<int:target_id>', methods=['POST'])
 @login_required
@@ -1398,15 +1675,45 @@ def update_permissions(target_id):
     target.perm_edit_history = data.get('perm_edit_history', False)
     target.perm_deleted_messages = data.get('perm_deleted_messages', False)
     target.perm_see_chatting_with = data.get('perm_see_chatting_with', False)
+    target.perm_ban_users = data.get('perm_ban_users', False)
     db.session.commit()
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/admin/ban/<int:target_id>', methods=['POST'])
+@login_required
+def admin_ban_user_endpoint(target_id):
+    if not can_ban_users(): return "Forbidden", 403
+    target = User.query.get_or_404(target_id)
+    if target.is_admin and not current_user.is_admin: return "Cannot ban admin", 403
+
+    data = request.json
+    action = data.get('action')
+
+    if action == 'unban':
+        target.banned_until = None
+    elif action == 'forever':
+        target.banned_until = datetime(9999, 12, 31, 23, 59, 59)
+        socketio.emit('force_logout', {}, room=f"user_{target.id}")
+    elif action == 'temporary':
+        until_str = data.get('until')
+        if until_str:
+            try:
+                dt = datetime.strptime(until_str.replace("T", " ")[:16], "%Y-%m-%d %H:%M")
+                target.banned_until = dt
+                socketio.emit('force_logout', {}, room=f"user_{target.id}")
+            except Exception as e:
+                return "Invalid date format", 400
+
+    db.session.commit()
+    broadcast_user_status(target.id)
     return jsonify({'status': 'ok'})
 
 @app.route('/api/admin/history_24h/<int:target_id>')
 @login_required
 def admin_history_24h(target_id):
-    if not (has_admin_priv() or current_user.is_moderator): return "Forbidden", 403
+    if not (has_admin_priv() or current_user.is_moderator or can_ban_users()): return "Forbidden", 403
     
-    yesterday = datetime.utcnow() - timedelta(days=1)
+    yesterday = now_msk() - timedelta(days=1)
     participants = ChatParticipant.query.filter_by(user_id=target_id).all()
     
     result = []
@@ -1470,9 +1777,13 @@ def broadcast_user_status(user_id):
 @socketio.on('connect')
 def handle_connect():
     if current_user.is_authenticated:
+        banned, _, _ = check_user_banned(current_user)
+        if banned:
+            return False # Жестко отсекаем коннект заблокированному
+
         join_room(f"user_{current_user.id}")
         connected_users[current_user.id] = request.sid
-        current_user.last_seen = datetime.utcnow()
+        current_user.last_seen = now_msk()
         db.session.commit()
         broadcast_user_status(current_user.id)
 
@@ -1483,7 +1794,7 @@ def handle_disconnect():
         if current_user.id in active_chat_views: del active_chat_views[current_user.id]
         u = User.query.get(current_user.id)
         if u:
-            u.last_seen = datetime.utcnow()
+            u.last_seen = now_msk()
             db.session.commit()
             broadcast_user_status(current_user.id)
 
@@ -1514,6 +1825,7 @@ def handle_message(data):
     msg = Message(
         chat_id=chat_id, sender_id=current_user.id, 
         text=data.get('text', ''), image_base64=data.get('image_base64'), 
+        voice_base64=data.get('voice_base64'),
         reply_to_id=reply_to_id, forwarded_from_id=forwarded_from_id, is_read=False
     )
     db.session.add(msg)
@@ -1522,7 +1834,10 @@ def handle_message(data):
     reply_text = ""
     if reply_to_id:
         rm = Message.query.get(reply_to_id)
-        if rm: reply_text = (rm.text[:25] + "...") if (rm.text and len(rm.text) > 25) else (rm.text or "[Фото]")
+        if rm:
+            if rm.voice_base64: reply_text = "[Голосовое]"
+            elif rm.text: reply_text = (rm.text[:25] + "...") if len(rm.text) > 25 else rm.text
+            else: reply_text = "[Фото]"
 
     fwd_name = ""
     if forwarded_from_id:
@@ -1531,7 +1846,7 @@ def handle_message(data):
 
     msg_data = {
         'id': msg.id, 'chat_id': chat_id, 'sender_id': current_user.id,
-        'text': msg.text, 'image_base64': msg.image_base64,
+        'text': msg.text, 'image_base64': msg.image_base64, 'voice_base64': msg.voice_base64,
         'time': msg.timestamp.strftime('%H:%M'), 'is_read': False,
         'is_deleted': False, 'is_edited': False, 'original_text': None,
         'reply_to_id': reply_to_id, 'reply_text': reply_text,
@@ -1576,24 +1891,23 @@ def init_db():
         db.create_all()
 
         try:
-            # Новые поля для сообщений
             db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE;"))
             db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_edited BOOLEAN DEFAULT FALSE;"))
             db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS original_text TEXT;"))
             db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id INTEGER;"))
             db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded_from_id INTEGER;"))
+            db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS voice_base64 TEXT;"))
             
-            # Новые поля для SUDO прав юзеров
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_moderator BOOLEAN DEFAULT FALSE;"))
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS perm_edit_history BOOLEAN DEFAULT FALSE;"))
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS perm_deleted_messages BOOLEAN DEFAULT FALSE;"))
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS perm_see_chatting_with BOOLEAN DEFAULT FALSE;"))
+            db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS perm_ban_users BOOLEAN DEFAULT FALSE;"))
+            db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_until TIMESTAMP;"))
             
-            # Снимаем обязательность с поля last_name
             db.session.execute(text("ALTER TABLE users ALTER COLUMN last_name DROP NOT NULL;"))
-            
             db.session.commit()
-            print("База данных успешно синхронизирована (Sudo-колонки добавлены).")
+            print("База данных успешно синхронизирована (Sudo-колонки и Voice добавлены).")
         except Exception as e:
             db.session.rollback()
             print(f"Ошибка при обновлении структуры базы данных: {e}")
@@ -1602,7 +1916,7 @@ def init_db():
             admin = User(
                 username='admin', password='admin',
                 first_name='Admin', last_name='',
-                is_admin=True, last_seen=datetime.utcnow()
+                is_admin=True, last_seen=now_msk()
             )
             db.session.add(admin)
             db.session.commit()
