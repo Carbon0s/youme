@@ -4,7 +4,7 @@ monkey.patch_all()
 
 import os
 from datetime import datetime, timedelta
-from flask import Flask, request, redirect, url_for, flash, session, jsonify, render_template_string, send_from_directory
+from flask import Flask, request, redirect, url_for, flash, session, jsonify, render_template_string, send_from_directory, abort
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_socketio import SocketIO, emit, join_room
@@ -43,6 +43,9 @@ socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins="*")
 # ==========================================
 def now_msk():
     return datetime.utcnow() + timedelta(hours=3)
+
+def get_msk_today_str():
+    return now_msk().strftime('%Y-%m-%d')
 
 def format_last_seen_str(dt):
     if not dt:
@@ -121,7 +124,6 @@ class User(UserMixin, db.Model):
     birth_date = db.Column(db.String(20), nullable=True)
     last_seen = db.Column(db.DateTime, default=now_msk)
 
-    # Настройки Конфиденциальности ('everyone', 'contacts', 'nobody')
     privacy_phone = db.Column(db.String(20), default='everyone')
     privacy_bday = db.Column(db.String(20), default='everyone')
     privacy_last_seen = db.Column(db.String(20), default='everyone')
@@ -133,8 +135,13 @@ class User(UserMixin, db.Model):
     perm_deleted_messages = db.Column(db.Boolean, default=False)
     perm_see_chatting_with = db.Column(db.Boolean, default=False)
     perm_ban_users = db.Column(db.Boolean, default=False)
+    perm_grant_gifts = db.Column(db.Boolean, default=False)      # Sudo подарки
+    perm_grant_lightnings = db.Column(db.Boolean, default=False) # Sudo молнии
 
     banned_until = db.Column(db.DateTime, nullable=True)
+    lightnings = db.Column(db.Integer, default=0)
+    q3_claimed = db.Column(db.Boolean, default=False)
+
     promoted_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=now_msk)
 
@@ -176,12 +183,44 @@ class Message(db.Model):
     voice_base64 = db.Column(db.Text, nullable=True)
     timestamp = db.Column(db.DateTime, default=now_msk)
     is_read = db.Column(db.Boolean, default=False)
-    
     is_deleted = db.Column(db.Boolean, default=False)
     is_edited = db.Column(db.Boolean, default=False)
     original_text = db.Column(db.Text, nullable=True)
     reply_to_id = db.Column(db.Integer, db.ForeignKey('messages.id', ondelete='SET NULL'), nullable=True)
     forwarded_from_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+
+class GiftDefinition(db.Model):
+    __tablename__ = 'gift_definitions'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    image_filename = db.Column(db.String(100), nullable=False)
+    price = db.Column(db.Integer, nullable=False)
+
+class UserGift(db.Model):
+    __tablename__ = 'user_gifts'
+    id = db.Column(db.Integer, primary_key=True)
+    owner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    gift_def_id = db.Column(db.Integer, db.ForeignKey('gift_definitions.id'), nullable=False)
+    is_pinned = db.Column(db.Boolean, default=False)
+    slot_index = db.Column(db.Integer, nullable=True) # 0..3
+    is_for_sale = db.Column(db.Boolean, default=False)
+    sale_price = db.Column(db.Integer, nullable=True)
+    acquired_at = db.Column(db.DateTime, default=now_msk)
+
+    gift_def = db.relationship('GiftDefinition', backref='instances')
+    owner = db.relationship('User', backref='gifts')
+
+class QuestProgress(db.Model):
+    __tablename__ = 'quest_progress'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    date_str = db.Column(db.String(10), nullable=False)
+    messages_sent = db.Column(db.Integer, default=0)
+    replies_received = db.Column(db.Integer, default=0)
+    photos_sent = db.Column(db.Integer, default=0)
+    q1_claimed = db.Column(db.Boolean, default=False)
+    q2_claimed = db.Column(db.Boolean, default=False)
+    q4_claimed = db.Column(db.Boolean, default=False)
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -189,6 +228,31 @@ def load_user(user_id):
 
 connected_users = {}
 active_chat_views = {} 
+
+def get_or_create_quest(user_id):
+    today = get_msk_today_str()
+    q = QuestProgress.query.filter_by(user_id=user_id, date_str=today).first()
+    if not q:
+        q = QuestProgress(user_id=user_id, date_str=today)
+        db.session.add(q)
+        db.session.commit()
+    return q
+
+def hook_track_message(sender_id, reply_to_msg_id=None, has_photo=False):
+    try:
+        q_sender = get_or_create_quest(sender_id)
+        q_sender.messages_sent += 1
+        if has_photo: q_sender.photos_sent += 1
+        db.session.commit()
+
+        if reply_to_msg_id:
+            rm = Message.query.get(reply_to_msg_id)
+            if rm and rm.sender_id != sender_id:
+                q_rec = get_or_create_quest(rm.sender_id)
+                q_rec.replies_received += 1
+                db.session.commit()
+    except Exception as e:
+        print(f"Quest hook error: {e}")
 
 # ==========================================
 # HTML ШАБЛОНЫ
@@ -239,12 +303,9 @@ BANNED_TEMPLATE = BASE_HTML_HEAD + """
             </div>
             <h2 class="text-2xl font-bold text-red-500 mb-4">Вход ограничен</h2>
             <p class="text-gray-200 text-base md:text-lg mb-6 font-medium leading-relaxed">
-                {% if is_permanent %}
-                    Вы были заблокированы навсегда
-                {% else %}
-                    Вы были заблокированы до<br>
-                    <span class="font-mono font-bold text-red-400 text-lg block mt-2">{{ ban_date_str }}</span>
-                {% endif %}
+                {% if is_permanent %}Вы были заблокированы навсегда
+                {% else %}Вы были заблокированы до<br>
+                <span class="font-mono font-bold text-red-400 text-lg block mt-2">{{ ban_date_str }}</span>{% endif %}
             </p>
             <div class="w-full border-t border-gray-700/80 pt-4 mt-2">
                 <span class="text-xs text-gray-400 tracking-wider">Администрация You`Me</span>
@@ -254,8 +315,7 @@ BANNED_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         </div>
     </div>
-</body>
-</html>
+</body></html>
 """
 
 MICRO_TEMPLATE = BASE_HTML_HEAD + """
@@ -268,65 +328,44 @@ MICRO_TEMPLATE = BASE_HTML_HEAD + """
             <h1 class="text-base md:text-xl font-bold text-white">Инструкция по включению микрофона</h1>
             <div class="w-20 hidden md:block"></div>
         </div>
-
         <div class="flex-1 flex flex-col items-center justify-center min-h-0 relative bg-black/40 rounded-xl border border-gray-800 p-2 md:p-4 overflow-hidden">
             <img :src="'/screen' + step" alt="Шаг инструкции" class="max-w-full max-h-full object-contain rounded-lg shadow-2xl transition-all duration-300" onerror="this.src='https://placehold.co/600x400/1e293b/ffffff?text=Скриншот+' + step + '+отсутствует'">
         </div>
-
         <div class="flex items-center justify-between pt-4 mt-4 border-t border-gray-800 flex-shrink-0 gap-2 md:gap-4">
-            <button @click="if(step > 1) step--" :disabled="step === 1" 
-                    :class="step === 1 ? 'opacity-30 cursor-not-allowed bg-gray-800 text-gray-500' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg'"
-                    class="flex items-center gap-1 md:gap-2 px-4 md:px-6 py-2.5 rounded-full font-bold text-xs md:text-sm transition">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
-                <span>Назад</span>
+            <button @click="if(step > 1) step--" :disabled="step === 1" :class="step === 1 ? 'opacity-30 cursor-not-allowed bg-gray-800 text-gray-500' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg'" class="flex items-center gap-1 md:gap-2 px-4 md:px-6 py-2.5 rounded-full font-bold text-xs md:text-sm transition">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg><span>Назад</span>
             </button>
-
             <div class="font-mono text-xs md:text-base font-bold text-gray-400 bg-gray-800/80 px-4 py-1.5 rounded-full border border-gray-700">
                 Шаг <span class="text-white" x-text="step"></span> из <span x-text="total"></span>
             </div>
-
-            <button @click="if(step < total) step++" :disabled="step === total"
-                    :class="step === total ? 'opacity-30 cursor-not-allowed bg-gray-800 text-gray-500' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg'"
-                    class="flex items-center gap-1 md:gap-2 px-4 md:px-6 py-2.5 rounded-full font-bold text-xs md:text-sm transition">
-                <span>Вперед</span>
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+            <button @click="if(step < total) step++" :disabled="step === total" :class="step === total ? 'opacity-30 cursor-not-allowed bg-gray-800 text-gray-500' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg'" class="flex items-center gap-1 md:gap-2 px-4 md:px-6 py-2.5 rounded-full font-bold text-xs md:text-sm transition">
+                <span>Вперед</span><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
             </button>
         </div>
     </div>
-</body>
-</html>
+</body></html>
 """
 
 LOGIN_TEMPLATE = BASE_HTML_HEAD + """
     <div class="flex-1 flex items-center justify-center bg-gray-900 px-4" x-data="{ isLogin: true }">
         <div class="bg-gray-800 p-6 md:p-8 rounded-xl shadow-2xl w-full max-w-md border border-gray-700">
             <h1 class="text-3xl font-bold text-center text-blue-500 mb-6 font-serif tracking-widest">You`me</h1>
-            {% with messages = get_flashed_messages() %}
-              {% if messages %}
+            {% with messages = get_flashed_messages() %}{% if messages %}
                 <div class="bg-red-500/20 border border-red-500 text-red-200 p-3 rounded mb-4 text-center text-sm">
                   {% for message in messages %}{{ message }}<br>{% endfor %}
                 </div>
-              {% endif %}
-            {% endwith %}
+            {% endif %}{% endwith %}
             <form x-show="isLogin" action="{{ url_for('login') }}" method="POST" class="space-y-4">
                 <input type="hidden" name="action" value="login">
-                <div>
-                    <input type="text" name="username" placeholder="Логин (@username)" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
-                </div>
-                <div>
-                    <input type="password" name="password" placeholder="Пароль" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
-                </div>
+                <div><input type="text" name="username" placeholder="Логин (@username)" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500"></div>
+                <div><input type="password" name="password" placeholder="Пароль" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500"></div>
                 <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 md:py-2 rounded transition">Войти</button>
                 <p class="text-center text-sm text-gray-400 mt-4">Нет аккаунта? <a href="#" @click.prevent="isLogin = false" class="text-blue-400 hover:underline">Регистрация</a></p>
             </form>
             <form x-show="!isLogin" action="{{ url_for('login') }}" method="POST" class="space-y-4" style="display: none;">
                 <input type="hidden" name="action" value="register">
-                <div>
-                    <input type="text" name="username" placeholder="Придумайте логин (только латиница)" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
-                </div>
-                <div>
-                    <input type="password" name="password" placeholder="Пароль" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
-                </div>
+                <div><input type="text" name="username" placeholder="Придумайте логин (только латиница)" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500"></div>
+                <div><input type="password" name="password" placeholder="Пароль" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500"></div>
                 <div class="flex flex-col gap-4 md:gap-2">
                     <input type="text" name="first_name" placeholder="Имя" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
                     <input type="text" name="last_name" placeholder="Фамилия (необязательно)" class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
@@ -336,15 +375,13 @@ LOGIN_TEMPLATE = BASE_HTML_HEAD + """
             </form>
         </div>
     </div>
-</body>
-</html>
+</body></html>
 """
 
 APP_TEMPLATE = BASE_HTML_HEAD + """
     <div class="flex-1 flex overflow-hidden w-full h-full max-h-full" x-data="messengerApp()">
 
-        <div class="bg-gray-900 border-r border-gray-800 flex-col flex-shrink-0 w-full md:w-80 h-full max-h-full"
-             :class="currentChat ? 'hidden md:flex' : 'flex'">
+        <div class="bg-gray-900 border-r border-gray-800 flex-col flex-shrink-0 w-full md:w-80 h-full max-h-full" :class="currentChat ? 'hidden md:flex' : 'flex'">
              
             <div class="p-4 border-b border-gray-800 flex justify-between items-center flex-shrink-0 relative">
                 <div class="flex items-center gap-3">
@@ -356,8 +393,13 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     <div class="text-xl font-bold text-blue-500 tracking-wider" style="display:none;">You`me</div>
                 </div>
 
-                <div class="flex gap-2">
-                    {% if current_user.is_admin or current_user.is_moderator or current_user.perm_ban_users or session.get('original_admin_id') %}
+                <div class="flex items-center gap-2">
+                    <div @click="openQuestsModal()" class="flex items-center gap-1 bg-green-500/15 hover:bg-green-500/25 border border-green-500/40 px-3 py-1 rounded-full cursor-pointer transition shadow-sm" title="Ежедневные задания">
+                        <span class="text-green-400 text-sm">⚡</span>
+                        <span class="text-white font-mono font-bold text-xs md:text-sm" x-text="myLightnings"></span>
+                    </div>
+
+                    {% if current_user.is_admin or current_user.is_moderator or current_user.perm_ban_users or current_user.perm_grant_gifts or current_user.perm_grant_lightnings or session.get('original_admin_id') %}
                     <a href="{{ url_for('admin_panel') }}" class="p-1 text-gray-400 hover:text-white" title="Панель Управления">
                         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.427.738-3.2 2.23-2.47z"></path></svg>
                     </a>
@@ -426,9 +468,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         </div>
 
-        <div class="flex-1 flex-col relative bg-[#0f172a] bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] h-full w-full max-h-full overflow-hidden" 
-             style="background-blend-mode: overlay;"
-             :class="currentChat ? 'flex' : 'hidden md:flex'">
+        <div class="flex-1 flex-col relative bg-[#0f172a] bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] h-full w-full max-h-full overflow-hidden" style="background-blend-mode: overlay;" :class="currentChat ? 'flex' : 'hidden md:flex'">
 
             <template x-if="!currentChat">
                 <div class="flex-1 flex items-center justify-center text-gray-500">
@@ -473,7 +513,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             <button @click="menuOpen = !menuOpen" class="p-2 text-gray-400 hover:text-white transition rounded-full hover:bg-gray-800">
                                 <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M12 16a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2m0-6a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2m0-6a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2z"></path></svg>
                             </button>
-
                             <div x-show="menuOpen" @click.away="menuOpen = false" class="absolute right-0 top-full mt-2 w-48 bg-gray-800 rounded-2xl shadow-2xl border border-gray-700 py-2 z-50 text-sm font-medium">
                                 <button @click="menuOpen = false; openContactModal()" class="w-full text-left px-4 py-2 hover:bg-gray-700 text-white flex items-center gap-2">
                                     <span x-text="currentChat.is_explicit_contact ? 'Изменить контакт' : 'Добавить контакт'"></span>
@@ -483,7 +522,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                 </button>
                             </div>
                         </div>
-
                     </div>
 
                     <div class="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 max-h-full" id="messagesBox">
@@ -648,42 +686,379 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         </div>
 
-        <div x-show="contextMenu.show" 
-             @click.away="contextMenu.show = false"
-             class="fixed bg-gray-800 border border-gray-700 text-white rounded-xl shadow-2xl w-44 py-1.5 z-50 text-xs md:text-sm font-medium"
-             :style="`left: ${contextMenu.x}px; top: ${contextMenu.y}px;`"
-             style="display: none;">
-             
-             <button @click="actionReply()" class="w-full text-left px-4 py-2 hover:bg-gray-700 flex items-center gap-2 text-gray-200">
-                 <span>Ответить</span>
-             </button>
-             
-             <template x-if="contextMenu.msg && contextMenu.msg.sender_id === myId && !contextMenu.msg.is_deleted && !contextMenu.msg.voice_base64">
-                 <button @click="actionEdit()" class="w-full text-left px-4 py-2 hover:bg-gray-700 flex items-center gap-2 text-gray-200">
-                     <span>Изменить</span>
-                 </button>
-             </template>
-             
-             <button @click="actionForward()" class="w-full text-left px-4 py-2 hover:bg-gray-700 flex items-center gap-2 text-gray-200">
-                 <span>Переслать</span>
-             </button>
-             
-             <template x-if="contextMenu.msg && (contextMenu.msg.sender_id === myId || myProfileData.can_see_deleted) && !contextMenu.msg.is_deleted">
-                 <button @click="actionDelete()" class="w-full text-left px-4 py-2 hover:bg-red-950/40 text-red-400 flex items-center gap-2">
-                     <span>Удалить</span>
-                 </button>
-             </template>
+        <div x-show="showProfileModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" @click.self="closeProfileModal()">
+             <div class="bg-[#242f3d] w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden flex flex-col relative text-gray-100 max-h-[90vh]">
 
+                <div class="absolute top-4 right-4 flex gap-4 z-20">
+                    <button x-show="isMyProfile && !editMode && !privacyMode" @click="editMode = true" class="text-white hover:text-blue-400 drop-shadow-md">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
+                    </button>
+                    <button @click="closeProfileModal()" class="text-white hover:text-red-400 drop-shadow-md">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                </div>
+
+                <div x-show="!editMode && !privacyMode" class="flex flex-col overflow-y-auto">
+                    <div class="relative pb-6 bg-gradient-to-b from-[#1c242f] to-[#242f3d]">
+                        <div class="w-24 h-24 md:w-32 md:h-32 mx-auto mt-8 rounded-full bg-blue-600 flex items-center justify-center text-4xl font-bold shadow-lg overflow-hidden border-2 border-transparent">
+                            <img x-show="viewProfileData.avatar" :src="viewProfileData.avatar" class="w-full h-full object-cover">
+                            <span x-show="!viewProfileData.avatar" x-text="viewProfileData.first_name ? viewProfileData.first_name[0] : ''"></span>
+                        </div>
+                        <div class="text-center mt-4 px-4">
+                            <div class="text-lg md:text-xl font-bold flex items-center justify-center gap-2 flex-wrap">
+                                <span x-text="viewProfileData.display_name || (viewProfileData.first_name + ' ' + (viewProfileData.last_name || ''))"></span>
+                                <template x-if="viewProfileData.is_admin"><span class="admin-badge">Admin</span></template>
+                                <template x-if="viewProfileData.is_moderator"><span class="mod-badge">Moderator</span></template>
+                            </div>
+                             <div class="text-xs md:text-sm mt-1" :class="viewProfileData.is_online ? 'text-blue-400' : 'text-gray-400'" 
+                                 x-text="viewProfileData.custom_status ? viewProfileData.custom_status : (viewProfileData.is_online ? 'в сети' : 'был(а) ' + (viewProfileData.last_seen || 'недавно'))"></div>
+                        </div>
+
+                        <div class="flex justify-center items-center gap-2.5 mt-5 px-4">
+                            <template x-for="slotIdx in [0, 1, 2, 3]" :key="slotIdx">
+                                <div @click="handleGiftSlotClick(slotIdx)" class="w-13 h-13 md:w-14 md:h-14 rounded-2xl bg-black/40 border border-white/10 flex items-center justify-center relative cursor-pointer hover:border-green-500 transition group shadow-inner">
+                                    <template x-if="getPinnedGiftAt(slotIdx)">
+                                        <img :src="getPinnedGiftAt(slotIdx).img" class="w-9 h-9 md:w-10 md:h-10 object-contain filter drop-shadow">
+                                    </template>
+                                    <template x-if="!getPinnedGiftAt(slotIdx) && isMyProfile">
+                                        <span class="text-white/20 text-2xl group-hover:text-green-400 font-extralight">+</span>
+                                    </template>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+
+                    <div class="px-6 pb-6 space-y-4 pt-2">
+                        <template x-if="viewProfileData.phone">
+                            <div class="border-b border-gray-700 pb-2">
+                                <div class="text-[14px] md:text-[15px] font-medium select-text" x-text="viewProfileData.phone"></div>
+                                <div class="text-[10px] md:text-xs text-gray-500">Телефон</div>
+                            </div>
+                        </template>
+
+                        <template x-if="viewProfileData.about_me">
+                             <div class="border-b border-gray-700 pb-2">
+                                <div class="text-[14px] md:text-[15px] whitespace-pre-wrap select-text" x-text="viewProfileData.about_me"></div>
+                                <div class="text-[10px] md:text-xs text-gray-500">О себе</div>
+                             </div>
+                        </template>
+
+                        <div class="border-b border-gray-700 pb-2">
+                            <div class="text-[14px] md:text-[15px] text-blue-400 select-text" x-text="'@' + viewProfileData.username"></div>
+                            <div class="text-[10px] md:text-xs text-gray-500">Имя пользователя</div>
+                        </div>
+
+                        <template x-if="viewProfileData.formatted_bday">
+                             <div class="border-b border-gray-700 pb-2">
+                                <div class="text-[14px] md:text-[15px]" x-text="viewProfileData.formatted_bday"></div>
+                                <div class="text-[10px] md:text-xs text-gray-500">День рождения</div>
+                             </div>
+                        </template>
+
+                        <div class="pt-2">
+                            <button @click="openGiftsShop()" class="w-full bg-gradient-to-r from-green-950/40 to-emerald-950/40 hover:from-green-900/50 hover:to-emerald-900/50 border border-green-800/50 text-green-300 p-3 rounded-xl font-bold flex items-center justify-between transition shadow-sm mb-3">
+                                <div class="flex items-center gap-2.5">
+                                    <span class="text-green-400 text-lg">🎁</span>
+                                    <span class="text-sm">Подарки</span>
+                                </div>
+                                <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+                            </button>
+
+                            <template x-if="isMyProfile">
+                                <div class="space-y-3">
+                                    <button @click="privacyMode = true" class="w-full bg-blue-950/40 hover:bg-blue-900/50 border border-blue-800/50 text-blue-300 p-3 rounded-xl font-bold flex items-center justify-between transition shadow-sm">
+                                        <div class="flex items-center gap-2.5">
+                                            <span class="text-blue-400 text-lg">🔒</span>
+                                            <span class="text-sm">Настройки Конфиденциальности</span>
+                                        </div>
+                                        <svg class="w-4 h-4 text-blue-400 transform -rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                                    </button>
+
+                                    <div class="pt-2">
+                                        <div class="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                                            <span class="text-base">📁</span><span>Помощь</span>
+                                        </div>
+                                        <div class="bg-[#1c242f] rounded-xl p-3 border border-gray-800">
+                                            <a href="/micro" class="text-blue-400 hover:text-blue-300 hover:underline font-medium text-sm block">Включение микрофона</a>
+                                        </div>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+
+                    </div>
+                </div>
+
+                <div x-show="editMode" class="p-6 overflow-y-auto">
+                    <h3 class="text-base md:text-lg font-bold mb-4 text-blue-400">Редактирование профиля</h3>
+                    <div class="flex flex-col items-center mb-4">
+                        <div class="w-20 h-20 md:w-24 md:h-24 rounded-full bg-blue-600 mb-2 flex items-center justify-center text-3xl font-bold overflow-hidden relative group">
+                            <img x-show="editProfileData.avatar" :src="editProfileData.avatar" class="w-full h-full object-cover">
+                            <span x-show="!editProfileData.avatar" x-text="editProfileData.first_name[0]"></span>
+                            <label class="absolute inset-0 bg-black/50 hidden group-hover:flex items-center justify-center cursor-pointer transition">
+                                <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 16V8a2 2 0 012-2h3l1-2h6l1 2h3a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 13a3 3 0 100-6 3 3 0 000 6z"></path></svg>
+                                <input type="file" class="hidden" accept="image/*" @change="handleAvatarSelect">
+                            </label>
+                        </div>
+                        <div class="text-[10px] md:text-xs text-gray-400">Нажмите для изменения фото</div>
+                    </div>
+                    <div class="space-y-4">
+                         <div>
+                            <label class="text-[10px] md:text-xs text-gray-400">Имя</label>
+                            <input type="text" x-model="editProfileData.first_name" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500 mb-2">
+
+                            <label class="text-[10px] md:text-xs text-gray-400">Фамилия</label>
+                            <input type="text" x-model="editProfileData.last_name" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500 mb-2">
+
+                            <label class="text-[10px] md:text-xs text-gray-400">Имя пользователя (никнейм)</label>
+                            <input type="text" x-model="editProfileData.username" :disabled="editProfileData.username === 'admin'" :class="editProfileData.username === 'admin' ? 'opacity-50 cursor-not-allowed' : ''" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500 mb-2">
+
+                            <label class="text-[10px] md:text-xs text-gray-400">День рождения</label>
+                            <div class="flex gap-2">
+                                <input type="number" x-model="editProfileData.birth_day" placeholder="День" class="w-1/3 bg-[#1c242f] border-none rounded p-2 text-sm text-white text-center focus:ring-1 focus:ring-blue-500">
+                                <input type="number" x-model="editProfileData.birth_month" placeholder="Мес" class="w-1/3 bg-[#1c242f] border-none rounded p-2 text-sm text-white text-center focus:ring-1 focus:ring-blue-500">
+                                <input type="number" x-model="editProfileData.birth_year" placeholder="Год" class="w-1/3 bg-[#1c242f] border-none rounded p-2 text-sm text-white text-center focus:ring-1 focus:ring-blue-500">
+                            </div>
+                        </div>
+                        <div>
+                            <label class="text-[10px] md:text-xs text-gray-400">Телефон</label>
+                            <input type="text" x-model="editProfileData.phone" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500">
+                        </div>
+                        <div>
+                            <label class="text-[10px] md:text-xs text-gray-400">О себе</label>
+                            <textarea x-model="editProfileData.about_me" rows="2" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500"></textarea>
+                        </div>
+                        <div class="mt-4 pt-4 border-t border-gray-700">
+                             <h4 class="text-xs md:text-sm font-semibold mb-2 text-gray-300">Смена пароля</h4>
+                             <input type="password" x-model="editProfileData.new_password" placeholder="Новый пароль" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500">
+                        </div>
+                        <div class="flex gap-2 pt-4">
+                            <button @click="saveProfile()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-2.5 rounded-xl text-sm font-bold transition">Сохранить</button>
+                            <button @click="editMode = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-2.5 rounded-xl text-sm font-bold transition">Отмена</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div x-show="privacyMode" class="p-6 overflow-y-auto">
+                    <h3 class="text-base md:text-lg font-bold mb-4 text-blue-400 flex items-center gap-2">
+                        <span>🔒</span><span>Кто видит мою информацию</span>
+                    </h3>
+                    <div class="space-y-4">
+                         <div class="bg-[#1c242f] p-3 rounded-xl border border-gray-800">
+                             <div class="flex justify-between items-center mb-2">
+                                 <span class="text-sm font-semibold text-white">Телефон</span>
+                                 <span class="text-xs text-blue-400 font-bold" x-text="translatePrivacy(editProfileData.privacy_phone)"></span>
+                             </div>
+                             <div class="grid grid-cols-3 gap-1.5 bg-gray-900 p-1 rounded-lg">
+                                 <button @click="editProfileData.privacy_phone = 'nobody'" :class="editProfileData.privacy_phone === 'nobody' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Никто</button>
+                                 <button @click="editProfileData.privacy_phone = 'contacts'" :class="editProfileData.privacy_phone === 'contacts' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Контакты</button>
+                                 <button @click="editProfileData.privacy_phone = 'everyone'" :class="editProfileData.privacy_phone === 'everyone' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Все</button>
+                             </div>
+                         </div>
+                         <div class="bg-[#1c242f] p-3 rounded-xl border border-gray-800">
+                             <div class="flex justify-between items-center mb-2">
+                                 <span class="text-sm font-semibold text-white">День рождения</span>
+                                 <span class="text-xs text-blue-400 font-bold" x-text="translatePrivacy(editProfileData.privacy_bday)"></span>
+                             </div>
+                             <div class="grid grid-cols-3 gap-1.5 bg-gray-900 p-1 rounded-lg">
+                                 <button @click="editProfileData.privacy_bday = 'nobody'" :class="editProfileData.privacy_bday === 'nobody' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Никто</button>
+                                 <button @click="editProfileData.privacy_bday = 'contacts'" :class="editProfileData.privacy_bday === 'contacts' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Контакты</button>
+                                 <button @click="editProfileData.privacy_bday = 'everyone'" :class="editProfileData.privacy_bday === 'everyone' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Все</button>
+                             </div>
+                         </div>
+                         <div class="bg-[#1c242f] p-3 rounded-xl border border-gray-800">
+                             <div class="flex justify-between items-center mb-2">
+                                 <span class="text-sm font-semibold text-white">Время захода</span>
+                                 <span class="text-xs text-blue-400 font-bold" x-text="translatePrivacy(editProfileData.privacy_last_seen)"></span>
+                             </div>
+                             <div class="grid grid-cols-3 gap-1.5 bg-gray-900 p-1 rounded-lg">
+                                 <button @click="editProfileData.privacy_last_seen = 'nobody'" :class="editProfileData.privacy_last_seen === 'nobody' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Никто</button>
+                                 <button @click="editProfileData.privacy_last_seen = 'contacts'" :class="editProfileData.privacy_last_seen === 'contacts' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Контакты</button>
+                                 <button @click="editProfileData.privacy_last_seen = 'everyone'" :class="editProfileData.privacy_last_seen === 'everyone' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Все</button>
+                             </div>
+                         </div>
+                    </div>
+                    <div class="flex gap-2 pt-6">
+                        <button @click="saveProfile()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-2.5 rounded-xl text-sm font-bold transition">Применить</button>
+                        <button @click="privacyMode = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-2.5 rounded-xl text-sm font-bold transition">Назад</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div x-show="showQuestsModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" @click.self="showQuestsModal = false">
+            <div class="bg-[#1e293b] p-6 rounded-2xl border border-green-500/40 w-full max-w-md shadow-2xl text-white max-h-[85vh] overflow-y-auto">
+                <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-3">
+                    <div class="flex items-center gap-2">
+                        <span class="text-2xl">⚡</span>
+                        <h3 class="font-bold text-lg">Ежедневные задания</h3>
+                    </div>
+                    <button @click="showQuestsModal = false" class="text-gray-400 hover:text-white font-bold text-lg">✕</button>
+                </div>
+                <p class="text-xs text-gray-400 mb-4">Выполняйте задания и получайте молнии для покупки подарков. Обновление каждый день в 00:00 (МСК)</p>
+
+                <div class="space-y-3">
+                    <template x-for="(q, key) in questItems" :key="key">
+                        <div class="bg-gray-800/80 border border-gray-700 p-3.5 rounded-xl flex items-center justify-between gap-3">
+                            <div class="flex-1 min-w-0">
+                                <div class="text-sm font-bold text-white truncate" x-text="q.name"></div>
+                                <div class="text-xs text-gray-400 mt-0.5">
+                                    Прогресс: <span class="text-green-400 font-mono font-bold" x-text="q.progress + '/' + q.target"></span>
+                                </div>
+                            </div>
+                            <button @click="executeClaimQuest(key)" :disabled="q.claimed || q.progress < q.target"
+                                    :class="q.claimed ? 'bg-gray-900 text-gray-600 border border-gray-800 cursor-not-allowed' : (q.progress >= q.target ? 'bg-green-600 hover:bg-green-500 text-black shadow-lg hover:scale-105' : 'bg-gray-700 text-gray-400 cursor-not-allowed')"
+                                    class="px-3.5 py-2 rounded-xl font-black text-xs transition flex items-center gap-1 flex-shrink-0">
+                                <span x-text="q.claimed ? 'Забрано' : ('+' + q.reward)"></span>
+                                <template x-if="!q.claimed"><span class="text-xs">⚡</span></template>
+                            </button>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+
+        <div x-show="showShopModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" @click.self="showShopModal = false">
+            <div class="bg-[#1e293b] p-6 rounded-2xl border border-gray-700 w-full max-w-lg shadow-2xl text-white max-h-[90vh] flex flex-col">
+                <div class="flex justify-between items-center mb-4 flex-shrink-0 border-b border-gray-700 pb-3">
+                    <div class="flex items-center gap-2">
+                        <span class="text-2xl">🎁</span>
+                        <h3 class="font-bold text-lg" x-text="shopModeInventory ? 'Мои подарки' : 'Магазин подарков'"></h3>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div class="bg-green-500/20 border border-green-500/40 px-3 py-1 rounded-full text-green-300 font-mono font-bold text-xs flex items-center gap-1">
+                            <span x-text="myLightnings"></span><span>⚡</span>
+                        </div>
+                        <button @click="showShopModal = false" class="text-gray-400 hover:text-white font-bold text-lg">✕</button>
+                    </div>
+                </div>
+
+                <template x-if="!shopModeInventory">
+                    <div class="flex gap-2 mb-4 bg-gray-900 p-1.5 rounded-xl flex-shrink-0">
+                        <button @click="shopTab = 'official'" :class="shopTab === 'official' ? 'bg-blue-600 text-white font-bold shadow' : 'text-gray-400 hover:text-white'" class="flex-1 py-2 rounded-lg text-xs md:text-sm transition">Новый магазин</button>
+                        <button @click="shopTab = 'market'" :class="shopTab === 'market' ? 'bg-blue-600 text-white font-bold shadow' : 'text-gray-400 hover:text-white'" class="flex-1 py-2 rounded-lg text-xs md:text-sm transition">Магазин пользователей</button>
+                    </div>
+                </template>
+
+                <div class="flex-1 overflow-y-auto min-h-[250px] pr-1">
+                    
+                    <template x-if="!shopModeInventory && shopTab === 'official'">
+                        <div class="grid grid-cols-2 gap-3">
+                            <template x-for="item in shopOfficial" :key="item.def_id">
+                                <div class="bg-gray-800/60 border border-gray-700/80 rounded-2xl p-3.5 flex flex-col items-center text-center justify-between group hover:border-green-500 transition">
+                                    <img :src="item.img" class="w-16 h-16 md:w-20 md:h-20 object-contain my-2 filter drop-shadow-md group-hover:scale-110 transition transform">
+                                    <div class="w-full">
+                                        <div class="font-bold text-sm text-white truncate" x-text="item.name"></div>
+                                        <button @click="executeBuyOfficialGift(item.def_id)" class="w-full mt-2.5 bg-green-600 hover:bg-green-500 text-black font-black py-2 rounded-xl text-xs shadow-md transition flex items-center justify-center gap-1">
+                                            <span>Купить за</span><span x-text="item.price"></span><span>⚡</span>
+                                        </button>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </template>
+
+                    <template x-if="!shopModeInventory && shopTab === 'market'">
+                        <div>
+                            <template x-if="shopMarket.length === 0">
+                                <div class="text-center py-10 text-gray-500 text-sm italic">На рынке пока нет выставленных подарков</div>
+                            </template>
+                            <div class="grid grid-cols-2 gap-3">
+                                <template x-for="item in shopMarket" :key="item.user_gift_id">
+                                    <div class="bg-gray-800/60 border border-gray-700/80 rounded-2xl p-3.5 flex flex-col items-center text-center justify-between group hover:border-blue-500 transition">
+                                        <div class="text-[10px] text-gray-400 w-full text-left truncate">Продавец: <span class="text-blue-400 font-bold" x-text="'@' + item.seller"></span></div>
+                                        <img :src="item.img" class="w-14 h-14 md:w-18 md:h-18 object-contain my-2 filter drop-shadow-md group-hover:scale-110 transition transform">
+                                        <div class="w-full">
+                                            <div class="font-bold text-xs md:text-sm text-white truncate" x-text="item.name"></div>
+                                            <div class="text-[10px] text-gray-500 line-through">Гос: <span x-text="item.store_price"></span>⚡</div>
+                                            <button @click="executeBuyMarketGift(item.user_gift_id)" class="w-full mt-1.5 bg-blue-600 hover:bg-blue-500 text-white font-black py-2 rounded-xl text-xs shadow-md transition flex items-center justify-center gap-1">
+                                                <span>Купить</span><span x-text="item.price"></span><span>⚡</span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+                    </template>
+
+                    <template x-if="shopModeInventory">
+                        <div>
+                            <template x-if="myGiftsInventory.length === 0">
+                                <div class="text-center py-10 text-gray-500 text-sm italic">У вас пока нет подарков. Приобретите их в магазине!</div>
+                            </template>
+                            <div class="grid grid-cols-2 gap-3">
+                                <template x-for="g in myGiftsInventory" :key="g.user_gift_id">
+                                    <div @click="if(pinningSlotIndex !== null) executePinGiftToSlot(g.user_gift_id)" 
+                                         class="bg-gray-800/80 border border-gray-700 rounded-2xl p-3.5 flex flex-col items-center text-center justify-between group transition cursor-pointer hover:border-green-500">
+                                        <div class="text-[10px] font-mono text-green-400 font-bold w-full text-left">Подарок #<span x-text="g.user_gift_id"></span></div>
+                                        <img :src="g.img" class="w-16 h-16 md:w-20 md:h-20 object-contain my-2 filter drop-shadow-lg group-hover:scale-110 transition transform">
+                                        <div class="w-full">
+                                            <div class="font-bold text-sm text-white truncate" x-text="g.name"></div>
+                                            <template x-if="pinningSlotIndex !== null">
+                                                <div class="mt-2 bg-green-500/20 border border-green-500 text-green-300 text-[11px] font-black py-1 rounded-lg">Выбрать для слота</div>
+                                            </template>
+                                            <template x-if="pinningSlotIndex === null">
+                                                <div class="text-[10px] text-gray-400 mt-1" x-text="g.is_pinned ? 'Закреплен' : (g.is_for_sale ? 'На продаже (' + g.sale_price + '⚡)' : 'В коллекции')"></div>
+                                            </template>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+                    </template>
+
+                </div>
+            </div>
+        </div>
+
+        <div x-show="showGiftViewModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" @click.self="showGiftViewModal = false">
+            <div class="bg-[#1e293b] p-6 rounded-3xl border border-gray-700 w-full max-w-xs shadow-2xl text-white text-center flex flex-col items-center relative">
+                <button @click="showGiftViewModal = false" class="absolute top-4 right-4 text-gray-400 hover:text-white font-bold">✕</button>
+                
+                <div class="text-xs font-mono text-green-400 font-bold bg-green-500/10 border border-green-500/30 px-3 py-1 rounded-full mb-3">
+                    Подарок #<span x-text="selectedGiftView ? selectedGiftView.user_gift_id : ''"></span>
+                </div>
+
+                <img :src="selectedGiftView ? selectedGiftView.img : ''" class="w-24 h-24 md:w-28 md:h-28 object-contain my-2 filter drop-shadow-xl">
+
+                <h3 class="text-lg font-black text-white mt-1" x-text="selectedGiftView ? selectedGiftView.name : ''"></h3>
+                <div class="text-xs text-gray-400 mt-0.5">Гос. стоимость: <span class="text-white font-bold" x-text="selectedGiftView ? selectedGiftView.store_price : ''"></span> ⚡</div>
+
+                <template x-if="isMyProfile && selectedGiftView">
+                    <div class="w-full mt-5 pt-4 border-t border-gray-700/80 space-y-2" x-data="{ inputSalePrice: '' }">
+                        <template x-if="selectedGiftView.is_pinned">
+                            <button @click="executeUnpinGiftSlot(selectedGiftView.slot_index)" class="w-full bg-gray-700 hover:bg-gray-600 text-white font-bold py-2.5 rounded-xl text-xs transition">Открепить от профиля</button>
+                        </template>
+
+                        <div class="flex gap-1.5 pt-1">
+                            <input type="number" x-model="inputSalePrice" placeholder="Цена⚡" class="w-1/2 bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs text-center outline-none">
+                            <button @click="executeToggleMarketSale(selectedGiftView.user_gift_id, inputSalePrice)" 
+                                    class="w-1/2 bg-blue-600 hover:bg-blue-500 text-white font-black py-2 rounded-xl text-xs transition shadow">
+                                <span x-text="selectedGiftView.is_for_sale ? 'Снять с продажи' : 'На Маркет'"></span>
+                            </button>
+                        </div>
+                        <div x-show="selectedGiftView.is_for_sale" class="text-[10px] text-yellow-400 font-bold">Выставлен на рынок за <span x-text="selectedGiftView.sale_price"></span>⚡</div>
+                    </div>
+                </template>
+            </div>
+        </div>
+
+        <div x-show="contextMenu.show" @click.away="contextMenu.show = false" class="fixed bg-gray-800 border border-gray-700 text-white rounded-xl shadow-2xl w-44 py-1.5 z-50 text-xs md:text-sm font-medium" :style="`left: ${contextMenu.x}px; top: ${contextMenu.y}px;`" style="display: none;">
+             <button @click="actionReply()" class="w-full text-left px-4 py-2 hover:bg-gray-700 flex items-center gap-2 text-gray-200"><span>Ответить</span></button>
+             <template x-if="contextMenu.msg && contextMenu.msg.sender_id === myId && !contextMenu.msg.is_deleted && !contextMenu.msg.voice_base64">
+                 <button @click="actionEdit()" class="w-full text-left px-4 py-2 hover:bg-gray-700 flex items-center gap-2 text-gray-200"><span>Изменить</span></button>
+             </template>
+             <button @click="actionForward()" class="w-full text-left px-4 py-2 hover:bg-gray-700 flex items-center gap-2 text-gray-200"><span>Переслать</span></button>
+             <template x-if="contextMenu.msg && (contextMenu.msg.sender_id === myId || myProfileData.can_see_deleted) && !contextMenu.msg.is_deleted">
+                 <button @click="actionDelete()" class="w-full text-left px-4 py-2 hover:bg-red-950/40 text-red-400 flex items-center gap-2"><span>Удалить</span></button>
+             </template>
              <template x-if="myProfileData.can_see_edits && contextMenu.msg && contextMenu.msg.is_edited">
-                 <button @click="actionShowHistory()" class="w-full text-left px-4 py-2 hover:bg-yellow-950/40 text-yellow-400 border-t border-gray-700 mt-1 flex items-center gap-2">
-                     <span>История изменений</span>
-                 </button>
+                 <button @click="actionShowHistory()" class="w-full text-left px-4 py-2 hover:bg-yellow-950/40 text-yellow-400 border-t border-gray-700 mt-1 flex items-center gap-2"><span>История изменений</span></button>
              </template>
         </div>
 
-        <div x-show="forwardModal" style="display: none;" 
-             class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-0 md:p-4"
-             @click.self="forwardModal = false">
+        <div x-show="forwardModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-0 md:p-4" @click.self="forwardModal = false">
              <div class="bg-[#1e293b] w-full h-full md:h-auto md:max-w-md md:rounded-xl shadow-2xl flex flex-col overflow-hidden border border-gray-700">
                  <div class="p-4 bg-gray-900 border-b border-gray-700 flex justify-between items-center flex-shrink-0">
                      <h3 class="font-bold text-white text-base">Переслать сообщение в...</h3>
@@ -713,199 +1088,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         </div>
 
-        <div x-show="showProfileModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" @click.self="closeProfileModal()">
-             <div class="bg-[#242f3d] w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden flex flex-col relative text-gray-100 max-h-[90vh]">
-
-                <div class="absolute top-4 right-4 flex gap-4 z-20">
-                    <button x-show="isMyProfile && !editMode && !privacyMode" @click="editMode = true" class="text-white hover:text-blue-400 drop-shadow-md">
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
-                    </button>
-                    <button @click="closeProfileModal()" class="text-white hover:text-red-400 drop-shadow-md">
-                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-                    </button>
-                </div>
-
-                <div x-show="!editMode && !privacyMode" class="flex flex-col overflow-y-auto">
-                    <div class="relative pb-6 bg-gradient-to-b from-[#1c242f] to-[#242f3d]">
-                        <div class="w-24 h-24 md:w-32 md:h-32 mx-auto mt-8 rounded-full bg-blue-600 flex items-center justify-center text-4xl font-bold shadow-lg overflow-hidden border-2 border-transparent">
-                            <img x-show="viewProfileData.avatar" :src="viewProfileData.avatar" class="w-full h-full object-cover">
-                            <span x-show="!viewProfileData.avatar" x-text="viewProfileData.first_name ? viewProfileData.first_name[0] : ''"></span>
-                        </div>
-                        <div class="text-center mt-4 px-4">
-                            <div class="text-lg md:text-xl font-bold flex items-center justify-center gap-2 flex-wrap">
-                                <span x-text="viewProfileData.display_name || (viewProfileData.first_name + ' ' + (viewProfileData.last_name || ''))"></span>
-                                <template x-if="viewProfileData.is_admin"><span class="admin-badge">Admin</span></template>
-                                <template x-if="viewProfileData.is_moderator"><span class="mod-badge">Moderator</span></template>
-                            </div>
-                             <div class="text-xs md:text-sm mt-1" :class="viewProfileData.is_online ? 'text-blue-400' : 'text-gray-400'" 
-                                 x-text="viewProfileData.custom_status ? viewProfileData.custom_status : (viewProfileData.is_online ? 'в сети' : 'был(а) ' + (viewProfileData.last_seen || 'недавно'))"></div>
-                        </div>
-                    </div>
-
-                    <div class="px-6 pb-6 space-y-4">
-                        <template x-if="viewProfileData.phone">
-                            <div class="border-b border-gray-700 pb-2">
-                                <div class="text-[14px] md:text-[15px] font-medium select-text" x-text="viewProfileData.phone"></div>
-                                <div class="text-[10px] md:text-xs text-gray-500">Телефон</div>
-                            </div>
-                        </template>
-
-                        <template x-if="viewProfileData.about_me">
-                             <div class="border-b border-gray-700 pb-2">
-                                <div class="text-[14px] md:text-[15px] whitespace-pre-wrap select-text" x-text="viewProfileData.about_me"></div>
-                                <div class="text-[10px] md:text-xs text-gray-500">О себе</div>
-                             </div>
-                        </template>
-
-                        <div class="border-b border-gray-700 pb-2">
-                            <div class="text-[14px] md:text-[15px] text-blue-400 select-text" x-text="'@' + viewProfileData.username"></div>
-                            <div class="text-[10px] md:text-xs text-gray-500">Имя пользователя</div>
-                        </div>
-
-                        <template x-if="viewProfileData.formatted_bday">
-                             <div class="border-b border-gray-700 pb-2">
-                                <div class="text-[14px] md:text-[15px]" x-text="viewProfileData.formatted_bday"></div>
-                                <div class="text-[10px] md:text-xs text-gray-500">День рождения</div>
-                             </div>
-                        </template>
-
-                        <template x-if="isMyProfile">
-                            <div class="pt-4 border-t border-gray-700/80 space-y-3">
-                                <button @click="privacyMode = true" class="w-full bg-blue-950/40 hover:bg-blue-900/50 border border-blue-800/50 text-blue-300 p-3 rounded-xl font-bold flex items-center justify-between transition shadow-sm">
-                                    <div class="flex items-center gap-2.5">
-                                        <span class="text-blue-400 text-lg">🔒</span>
-                                        <span class="text-sm">Настройки Конфиденциальности</span>
-                                    </div>
-                                    <svg class="w-4 h-4 text-blue-400 transform -rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
-                                </button>
-
-                                <div class="pt-2">
-                                    <div class="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-                                        <span class="text-base">📁</span>
-                                        <span>Помощь</span>
-                                    </div>
-                                    <div class="bg-[#1c242f] rounded-xl p-3 border border-gray-800">
-                                        <a href="/micro" class="text-blue-400 hover:text-blue-300 hover:underline font-medium text-sm block">Включение микрофона</a>
-                                    </div>
-                                </div>
-                            </div>
-                        </template>
-
-                    </div>
-                </div>
-
-                <div x-show="editMode" class="p-6 overflow-y-auto">
-                    <h3 class="text-base md:text-lg font-bold mb-4 text-blue-400">Редактирование профиля</h3>
-
-                    <div class="flex flex-col items-center mb-4">
-                        <div class="w-20 h-20 md:w-24 md:h-24 rounded-full bg-blue-600 mb-2 flex items-center justify-center text-3xl font-bold overflow-hidden relative group">
-                            <img x-show="editProfileData.avatar" :src="editProfileData.avatar" class="w-full h-full object-cover">
-                            <span x-show="!editProfileData.avatar" x-text="editProfileData.first_name[0]"></span>
-
-                            <label class="absolute inset-0 bg-black/50 hidden group-hover:flex items-center justify-center cursor-pointer transition">
-                                <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 16V8a2 2 0 012-2h3l1-2h6l1 2h3a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 13a3 3 0 100-6 3 3 0 000 6z"></path></svg>
-                                <input type="file" class="hidden" accept="image/*" @change="handleAvatarSelect">
-                            </label>
-                        </div>
-                        <div class="text-[10px] md:text-xs text-gray-400">Нажмите для изменения фото</div>
-                    </div>
-
-                    <div class="space-y-4">
-                         <div>
-                            <label class="text-[10px] md:text-xs text-gray-400">Имя</label>
-                            <input type="text" x-model="editProfileData.first_name" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500 mb-2">
-
-                            <label class="text-[10px] md:text-xs text-gray-400">Фамилия</label>
-                            <input type="text" x-model="editProfileData.last_name" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500 mb-2">
-
-                            <label class="text-[10px] md:text-xs text-gray-400">Имя пользователя (никнейм)</label>
-                            <input type="text" x-model="editProfileData.username" :disabled="editProfileData.username === 'admin'" :class="editProfileData.username === 'admin' ? 'opacity-50 cursor-not-allowed' : ''" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500 mb-2">
-                            <span x-show="editProfileData.username === 'admin'" class="text-[9px] text-red-400 block -mt-1 mb-2">Системный логин @admin изменить нельзя</span>
-
-                            <label class="text-[10px] md:text-xs text-gray-400">День рождения</label>
-                            <div class="flex gap-2">
-                                <input type="number" x-model="editProfileData.birth_day" placeholder="День" class="w-1/3 bg-[#1c242f] border-none rounded p-2 text-sm text-white text-center focus:ring-1 focus:ring-blue-500">
-                                <input type="number" x-model="editProfileData.birth_month" placeholder="Мес" class="w-1/3 bg-[#1c242f] border-none rounded p-2 text-sm text-white text-center focus:ring-1 focus:ring-blue-500">
-                                <input type="number" x-model="editProfileData.birth_year" placeholder="Год" class="w-1/3 bg-[#1c242f] border-none rounded p-2 text-sm text-white text-center focus:ring-1 focus:ring-blue-500">
-                            </div>
-                        </div>
-
-                        <div>
-                            <label class="text-[10px] md:text-xs text-gray-400">Телефон</label>
-                            <input type="text" x-model="editProfileData.phone" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500">
-                        </div>
-                        <div>
-                            <label class="text-[10px] md:text-xs text-gray-400">О себе</label>
-                            <textarea x-model="editProfileData.about_me" rows="2" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500"></textarea>
-                        </div>
-
-                        <div class="mt-4 pt-4 border-t border-gray-700">
-                             <h4 class="text-xs md:text-sm font-semibold mb-2 text-gray-300">Смена пароля</h4>
-                             <input type="password" x-model="editProfileData.new_password" placeholder="Новый пароль" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500">
-                        </div>
-
-                        <div class="flex gap-2 pt-4">
-                            <button @click="saveProfile()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-2.5 rounded-xl text-sm font-bold transition">Сохранить</button>
-                            <button @click="editMode = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-2.5 rounded-xl text-sm font-bold transition">Отмена</button>
-                        </div>
-                    </div>
-                </div>
-
-                <div x-show="privacyMode" class="p-6 overflow-y-auto">
-                    <h3 class="text-base md:text-lg font-bold mb-4 text-blue-400 flex items-center gap-2">
-                        <span>🔒</span>
-                        <span>Кто видит мою информацию</span>
-                    </h3>
-
-                    <div class="space-y-4">
-                         
-                         <div class="bg-[#1c242f] p-3 rounded-xl border border-gray-800">
-                             <div class="flex justify-between items-center mb-2">
-                                 <span class="text-sm font-semibold text-white">Телефон</span>
-                                 <span class="text-xs text-blue-400 font-bold" x-text="translatePrivacy(editProfileData.privacy_phone)"></span>
-                             </div>
-                             <div class="grid grid-cols-3 gap-1.5 bg-gray-900 p-1 rounded-lg">
-                                 <button @click="editProfileData.privacy_phone = 'nobody'" :class="editProfileData.privacy_phone === 'nobody' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Никто</button>
-                                 <button @click="editProfileData.privacy_phone = 'contacts'" :class="editProfileData.privacy_phone === 'contacts' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Контакты</button>
-                                 <button @click="editProfileData.privacy_phone = 'everyone'" :class="editProfileData.privacy_phone === 'everyone' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Все</button>
-                             </div>
-                         </div>
-
-                         <div class="bg-[#1c242f] p-3 rounded-xl border border-gray-800">
-                             <div class="flex justify-between items-center mb-2">
-                                 <span class="text-sm font-semibold text-white">День рождения</span>
-                                 <span class="text-xs text-blue-400 font-bold" x-text="translatePrivacy(editProfileData.privacy_bday)"></span>
-                             </div>
-                             <div class="grid grid-cols-3 gap-1.5 bg-gray-900 p-1 rounded-lg">
-                                 <button @click="editProfileData.privacy_bday = 'nobody'" :class="editProfileData.privacy_bday === 'nobody' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Никто</button>
-                                 <button @click="editProfileData.privacy_bday = 'contacts'" :class="editProfileData.privacy_bday === 'contacts' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Контакты</button>
-                                 <button @click="editProfileData.privacy_bday = 'everyone'" :class="editProfileData.privacy_bday === 'everyone' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Все</button>
-                             </div>
-                         </div>
-
-                         <div class="bg-[#1c242f] p-3 rounded-xl border border-gray-800">
-                             <div class="flex justify-between items-center mb-2">
-                                 <span class="text-sm font-semibold text-white">Время захода</span>
-                                 <span class="text-xs text-blue-400 font-bold" x-text="translatePrivacy(editProfileData.privacy_last_seen)"></span>
-                             </div>
-                             <div class="grid grid-cols-3 gap-1.5 bg-gray-900 p-1 rounded-lg">
-                                 <button @click="editProfileData.privacy_last_seen = 'nobody'" :class="editProfileData.privacy_last_seen === 'nobody' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Никто</button>
-                                 <button @click="editProfileData.privacy_last_seen = 'contacts'" :class="editProfileData.privacy_last_seen === 'contacts' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Контакты</button>
-                                 <button @click="editProfileData.privacy_last_seen = 'everyone'" :class="editProfileData.privacy_last_seen === 'everyone' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Все</button>
-                             </div>
-                         </div>
-
-                    </div>
-
-                    <div class="flex gap-2 pt-6">
-                        <button @click="saveProfile()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-2.5 rounded-xl text-sm font-bold transition">Применить</button>
-                        <button @click="privacyMode = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-2.5 rounded-xl text-sm font-bold transition">Назад</button>
-                    </div>
-                </div>
-
-            </div>
-        </div>
-
     </div>
 
     <script>
@@ -913,6 +1095,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             return {
                 socket: null,
                 myId: {{ current_user.id }},
+                myLightnings: {{ current_user.lightnings or 0 }},
                 chats: [],
                 searchQuery: '',
                 searchResults: [],
@@ -931,6 +1114,20 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
                 showContactModal: false,
                 contactCustomName: '',
+
+                // ПОДАРКИ И КВЕСТЫ
+                showQuestsModal: false,
+                questItems: {},
+                showShopModal: false,
+                shopTab: 'official',
+                shopModeInventory: false,
+                shopOfficial: [],
+                shopMarket: [],
+                myGiftsInventory: [],
+                pinnedGiftsSlots: [], // Скидывается с бэка: [{slot_index: 0, img: '...', name: '...'}, ...]
+                showGiftViewModal: false,
+                selectedGiftView: null,
+                pinningSlotIndex: null,
 
                 contextMenu: { show: false, x: 0, y: 0, msg: null },
                 longPressTimer: null,
@@ -954,33 +1151,21 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 init() {
                     this.fetchMyProfile();
                     this.socket = io();
-                    this.socket.on('connect', () => {
-                        this.loadChats();
-                    });
-                    this.socket.on('force_logout', () => {
-                        window.location.href = '/logout';
-                    });
+                    this.socket.on('connect', () => { this.loadChats(); });
+                    this.socket.on('force_logout', () => { window.location.href = '/logout'; });
                     this.socket.on('new_message', (data) => {
                         if (this.currentChat && this.currentChat.chat_id === data.chat_id) {
-                            if(data.sender_id !== this.myId) {
-                                this.reloadCurrentMessages();
-                            } else {
-                                this.messages.push(data);
-                                this.scrollToBottom();
-                            }
+                            if(data.sender_id !== this.myId) this.reloadCurrentMessages();
+                            else { this.messages.push(data); this.scrollToBottom(); }
                         }
                         this.loadChats();
                     });
                     this.socket.on('message_updated', (data) => {
-                        if (this.currentChat && this.currentChat.chat_id === data.chat_id) {
-                            this.reloadCurrentMessages();
-                        }
+                        if (this.currentChat && this.currentChat.chat_id === data.chat_id) this.reloadCurrentMessages();
                     });
                     this.socket.on('messages_read', (data) => {
                         if (this.currentChat && this.currentChat.chat_id === data.chat_id) {
-                            this.messages.forEach(m => {
-                                if (m.sender_id === this.myId) m.is_read = true;
-                            });
+                            this.messages.forEach(m => { if (m.sender_id === this.myId) m.is_read = true; });
                         }
                         this.loadChats();
                     });
@@ -992,16 +1177,13 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         this.loadChats().then(() => {
                             if (this.currentChat && this.currentChat.chat_id === data.chat_id) {
                                 const updatedChat = this.chats.find(c => c.chat_id === data.chat_id);
-                                if (updatedChat) {
-                                    this.currentChat = updatedChat;
-                                }
+                                if (updatedChat) this.currentChat = updatedChat;
                             }
                         });
                     });
                     this.socket.on('status_update', (data) => {
                          let chat = this.chats.find(c => c.partner_id === data.user_id);
                          let customStatus = (this.myProfileData.perm_see_chatting_with && data.chatting_with_name) ? `общается с: ${data.chatting_with_name}` : null;
-                         
                          if (chat) {
                              chat.is_online = data.status === 'online';
                              if(data.last_seen) chat.last_seen = data.last_seen;
@@ -1046,52 +1228,26 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         this.touchX = e.touches[0].clientX;
                         this.touchY = e.touches[0].clientY;
                     }
-                    this.longPressTimer = setTimeout(() => {
-                        this.openContextMenu(null, msg, true);
-                    }, 500);
+                    this.longPressTimer = setTimeout(() => { this.openContextMenu(null, msg, true); }, 500);
                 },
-                handleTouchEnd() {
-                    clearTimeout(this.longPressTimer);
-                },
+                handleTouchEnd() { clearTimeout(this.longPressTimer); },
 
-                actionReply() {
-                    this.contextMenu.show = false;
-                    this.editMessage = null;
-                    this.replyToMessage = this.contextMenu.msg;
-                },
-                actionEdit() {
-                    this.contextMenu.show = false;
-                    this.replyToMessage = null;
-                    this.editMessage = this.contextMenu.msg;
-                    this.newMessage = this.contextMenu.msg.text;
-                },
-                cancelEdit() {
-                    this.editMessage = null;
-                    this.newMessage = '';
-                },
-                actionForward() {
-                    this.contextMenu.show = false;
-                    this.forwardMessageTarget = this.contextMenu.msg;
-                    this.forwardModal = true;
-                },
+                actionReply() { this.contextMenu.show = false; this.editMessage = null; this.replyToMessage = this.contextMenu.msg; },
+                actionEdit() { this.contextMenu.show = false; this.replyToMessage = null; this.editMessage = this.contextMenu.msg; this.newMessage = this.contextMenu.msg.text; },
+                cancelEdit() { this.editMessage = null; this.newMessage = ''; },
+                actionForward() { this.contextMenu.show = false; this.forwardMessageTarget = this.contextMenu.msg; this.forwardModal = true; },
                 executeForward(chatId) {
                     if (!this.forwardMessageTarget) return;
                     this.socket.emit('send_message', {
-                        chat_id: chatId,
-                        text: this.forwardMessageTarget.text,
-                        image_base64: this.forwardMessageTarget.image_base64,
-                        voice_base64: this.forwardMessageTarget.voice_base64,
+                        chat_id: chatId, text: this.forwardMessageTarget.text,
+                        image_base64: this.forwardMessageTarget.image_base64, voice_base64: this.forwardMessageTarget.voice_base64,
                         forwarded_from_id: this.forwardMessageTarget.sender_id
                     });
-                    this.forwardModal = false;
-                    this.forwardMessageTarget = null;
-                    this.loadChats();
+                    this.forwardModal = false; this.forwardMessageTarget = null; this.loadChats();
                 },
                 actionDelete() {
                     this.contextMenu.show = false;
-                    if(confirm("Удалить это сообщение?")) {
-                        this.socket.emit('delete_message', { message_id: this.contextMenu.msg.id });
-                    }
+                    if(confirm("Удалить это сообщение?")) this.socket.emit('delete_message', { message_id: this.contextMenu.msg.id });
                 },
                 actionShowHistory() {
                     this.contextMenu.show = false;
@@ -1102,29 +1258,28 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 async fetchMyProfile() {
                     const res = await fetch('/api/profile/me');
                     this.myProfileData = await res.json();
+                    this.myLightnings = this.myProfileData.lightnings || 0;
                 },
                 openMyProfile() {
                     this.isMyProfile = true;
                     this.editMode = false;
                     this.privacyMode = false;
                     this.viewProfileData = { ...this.myProfileData };
+                    this.pinnedGiftsSlots = this.myProfileData.pinned_gifts || [];
                     this.editProfileData = { ...this.myProfileData, new_password: '' };
                     this.showProfileModal = true;
                 },
                 async openUserProfile(userId) {
-                    if(userId === this.myId) { return this.openMyProfile(); }
+                    if(userId === this.myId) return this.openMyProfile();
                     this.isMyProfile = false;
                     this.editMode = false;
                     this.privacyMode = false;
                     const res = await fetch('/api/profile/' + userId);
                     this.viewProfileData = await res.json();
+                    this.pinnedGiftsSlots = this.viewProfileData.pinned_gifts || [];
                     this.showProfileModal = true;
                 },
-                closeProfileModal() {
-                    this.showProfileModal = false;
-                    this.editMode = false;
-                    this.privacyMode = false;
-                },
+                closeProfileModal() { this.showProfileModal = false; this.editMode = false; this.privacyMode = false; },
                 translatePrivacy(val) {
                     if(val === 'nobody') return 'Никто';
                     if(val === 'contacts') return 'Контакты';
@@ -1139,15 +1294,13 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 },
                 async saveProfile() {
                     const res = await fetch('/api/profile/me', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(this.editProfileData)
                     });
                     if(res.ok) {
                         await this.fetchMyProfile();
                         this.viewProfileData = { ...this.myProfileData };
-                        this.editMode = false;
-                        this.privacyMode = false;
+                        this.editMode = false; this.privacyMode = false;
                     }
                 },
 
@@ -1158,8 +1311,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 async saveContactCustomName() {
                     if(!this.currentChat) return;
                     await fetch('/api/contact/save/' + this.currentChat.partner_id, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({ custom_name: this.contactCustomName })
                     });
                     this.showContactModal = false;
@@ -1170,6 +1322,111 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 async togglePersonalBlock() {
                     if(!this.currentChat) return;
                     await fetch('/api/block/toggle/' + this.currentChat.partner_id, { method: 'POST' });
+                },
+
+                // ==========================================
+                // ПОДАРКИ И КВЕСТЫ (JS ЛОГИКА)
+                // ==========================================
+                async openQuestsModal() {
+                    const res = await fetch('/api/quests');
+                    const data = await res.json();
+                    this.myLightnings = data.lightnings;
+                    this.questItems = data.quests;
+                    this.showQuestsModal = true;
+                },
+                async executeClaimQuest(questId) {
+                    const res = await fetch('/api/quests/claim', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ quest_id: questId })
+                    });
+                    const data = await res.json();
+                    if(data.success) {
+                        this.myLightnings = data.total;
+                        this.questItems[questId].claimed = true;
+                        if(this.isMyProfile) this.myProfileData.lightnings = data.total;
+                    } else alert(data.error);
+                },
+
+                getPinnedGiftAt(slotIndex) {
+                    return this.pinnedGiftsSlots.find(g => g.slot_index === slotIndex);
+                },
+                handleGiftSlotClick(slotIndex) {
+                    const existing = this.getPinnedGiftAt(slotIndex);
+                    if(existing) {
+                        this.selectedGiftView = existing;
+                        this.showGiftViewModal = true;
+                    } else if(this.isMyProfile) {
+                        this.pinningSlotIndex = slotIndex;
+                        this.openGiftsShop(true); // Открываем инвентарь для выбора подарка в этот слот
+                    }
+                },
+                async openGiftsShop(forceInventory = false) {
+                    this.shopModeInventory = forceInventory || (this.isMyProfile && event && event.target.innerText.includes('Мои'));
+                    if(!this.shopModeInventory) {
+                        const res = await fetch('/api/shop');
+                        const data = await res.json();
+                        this.shopOfficial = data.new_store;
+                        this.shopMarket = data.user_market;
+                    } else {
+                        const res = await fetch('/api/gifts/my');
+                        this.myGiftsInventory = await res.json();
+                    }
+                    this.showShopModal = true;
+                },
+                async executeBuyOfficialGift(defId) {
+                    const res = await fetch('/api/shop/buy_official', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ def_id: defId })
+                    });
+                    const data = await res.json();
+                    if(data.success) {
+                        this.myLightnings = data.new_balance;
+                        alert("Подарок приобретен! Он добавлен в вашу коллекцию.");
+                    } else alert(data.error);
+                },
+                async executeBuyMarketGift(userGiftId) {
+                    const res = await fetch('/api/shop/buy_market', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ user_gift_id: userGiftId })
+                    });
+                    const data = await res.json();
+                    if(data.success) {
+                        this.myLightnings = data.new_balance;
+                        this.shopMarket = this.shopMarket.filter(m => m.user_gift_id !== userGiftId);
+                        alert("Подарок куплен с рынка!");
+                    } else alert(data.error);
+                },
+                async executePinGiftToSlot(userGiftId) {
+                    if(this.pinningSlotIndex === null) return;
+                    await fetch('/api/gifts/pin', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ user_gift_id: userGiftId, slot_index: this.pinningSlotIndex })
+                    });
+                    this.pinningSlotIndex = null;
+                    this.showShopModal = false;
+                    await this.fetchMyProfile();
+                    this.pinnedGiftsSlots = this.myProfileData.pinned_gifts || [];
+                },
+                async executeUnpinGiftSlot(slotIndex) {
+                    await fetch('/api/gifts/unpin', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ slot_index: slotIndex })
+                    });
+                    this.showGiftViewModal = false;
+                    await this.fetchMyProfile();
+                    this.pinnedGiftsSlots = this.myProfileData.pinned_gifts || [];
+                },
+                async executeToggleMarketSale(userGiftId, priceStr) {
+                    const res = await fetch('/api/gifts/market_toggle', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ user_gift_id: userGiftId, price: priceStr })
+                    });
+                    const data = await res.json();
+                    if(data.success) {
+                        this.selectedGiftView.is_for_sale = data.is_for_sale;
+                        this.selectedGiftView.sale_price = data.is_for_sale ? priceStr : null;
+                        alert(data.is_for_sale ? 'Выставлено на рынок!' : 'Снято с продажи');
+                    } else alert(data.error || 'Ошибка');
                 },
 
                 async loadChats() {
@@ -1221,28 +1478,24 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     if (!this.newMessage.trim() && !this.imagePreview) return;
                     if (this.editMessage) {
                         this.socket.emit('edit_message', {
-                            message_id: this.editMessage.id,
-                            text: this.newMessage.trim()
+                            message_id: this.editMessage.id, text: this.newMessage.trim()
                         });
                         this.editMessage = null;
                     } else {
                         const payload = {
-                            chat_id: this.currentChat.chat_id,
-                            text: this.newMessage.trim(),
-                            image_base64: this.imagePreview,
-                            reply_to_id: this.replyToMessage ? this.replyToMessage.id : null
+                            chat_id: this.currentChat.chat_id, text: this.newMessage.trim(),
+                            image_base64: this.imagePreview, reply_to_id: this.replyToMessage ? this.replyToMessage.id : null
                         };
                         this.socket.emit('send_message', payload);
                         this.replyToMessage = null;
                     }
-
                     this.newMessage = '';
                     this.imagePreview = null;
                 },
 
                 async toggleVoiceRecord() {
                     const isMobileAgent = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-                    const isMobileLayout = window.innerWidth < 768; // Стиль отдельно чаты и развернутые чаты (ширина телефона)
+                    const isMobileLayout = window.innerWidth < 768; 
                     
                     if ((isMobileAgent || isMobileLayout) && !localStorage.getItem('mic_mobile_instructed')) {
                         this.showMicInstructionBanner = true;
@@ -1250,28 +1503,19 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         return;
                     }
 
-                    if (!this.isRecording) {
-                        await this.startRecording();
-                    } else {
-                        await this.stopRecording();
-                    }
+                    if (!this.isRecording) await this.startRecording();
+                    else await this.stopRecording();
                 },
                 async startRecording() {
                     try {
                         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
                         this.mediaRecorder = new MediaRecorder(stream);
-                        this.audioChunks = [];
-                        this.recordTimer = 0;
-                        this.isRecording = true;
+                        this.audioChunks = []; this.recordTimer = 0; this.isRecording = true;
 
-                        this.recordInterval = setInterval(() => {
-                            this.recordTimer++;
-                        }, 1000);
+                        this.recordInterval = setInterval(() => { this.recordTimer++; }, 1000);
 
                         this.mediaRecorder.ondataavailable = (e) => {
-                            if (e.data.size > 0) {
-                                this.audioChunks.push(e.data);
-                            }
+                            if (e.data.size > 0) this.audioChunks.push(e.data);
                         };
 
                         this.mediaRecorder.onstop = () => {
@@ -1284,39 +1528,28 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             reader.onloadend = () => {
                                 const base64Audio = reader.result;
                                 const payload = {
-                                    chat_id: this.currentChat.chat_id,
-                                    voice_base64: base64Audio,
+                                    chat_id: this.currentChat.chat_id, voice_base64: base64Audio,
                                     reply_to_id: this.replyToMessage ? this.replyToMessage.id : null
                                 };
                                 this.socket.emit('send_message', payload);
                                 this.replyToMessage = null;
                             };
-
                             stream.getTracks().forEach(track => track.stop());
                         };
-
                         this.mediaRecorder.start();
                     } catch (err) {
                         alert('Не удалось получить доступ к микрофону: ' + err.message);
                         this.isRecording = false;
                     }
                 },
-                stopRecording() {
-                    if (this.mediaRecorder && this.isRecording) {
-                        this.mediaRecorder.stop();
-                    }
-                },
+                stopRecording() { if (this.mediaRecorder && this.isRecording) this.mediaRecorder.stop(); },
                 formatTimer(seconds) {
                     const mins = Math.floor(seconds / 60).toString().padStart(2, '0');
                     const secs = (seconds % 60).toString().padStart(2, '0');
                     return `${mins}:${secs}`;
                 },
 
-                sendTyping() {
-                    if (this.currentChat) {
-                        this.socket.emit('typing', { chat_id: this.currentChat.chat_id });
-                    }
-                },
+                sendTyping() { if (this.currentChat) this.socket.emit('typing', { chat_id: this.currentChat.chat_id }); },
                 scrollToBottom() {
                     setTimeout(() => {
                         const box = document.getElementById('messagesBox');
@@ -1326,8 +1559,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             }
         }
     </script>
-</body>
-</html>
+</body></html>
 """
 
 ADMIN_TEMPLATE = BASE_HTML_HEAD + """
@@ -1337,28 +1569,52 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
             <a href="{{ url_for('index') }}" class="text-blue-400 hover:text-blue-300 transition text-sm md:text-base">&larr; В мессенджер</a>
         </div>
 
-        {% with messages = get_flashed_messages() %}
-          {% if messages %}
+        {% with messages = get_flashed_messages() %}{% if messages %}
             <div class="bg-blue-500/20 text-blue-300 p-3 rounded mb-4 text-sm border border-blue-500">
               {% for message in messages %}{{ message }}<br>{% endfor %}
             </div>
-          {% endif %}
-        {% endwith %}
+        {% endif %}{% endwith %}
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+            {% if current_user.is_admin or current_user.perm_grant_lightnings %}
+            <form action="{{ url_for('admin_grant_lightnings') }}" method="POST" class="bg-gray-800 p-4 rounded-2xl border border-gray-700 flex flex-col gap-2.5 shadow">
+                <div class="font-black text-green-400 text-sm flex items-center gap-1"><span>⚡</span><span>Выдать молнии пользователю</span></div>
+                <select name="user_id" class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
+                    {% for u in users %}<option value="{{ u.id }}">{{ u.username }} ({{ u.first_name }})</option>{% endfor %}
+                </select>
+                <input type="number" name="amount" placeholder="Количество ⚡" required class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
+                <button type="submit" class="bg-green-600 hover:bg-green-500 text-black font-black py-2 rounded-xl text-xs transition">Зачислить</button>
+            </form>
+            {% endif %}
+
+            {% if current_user.is_admin or current_user.perm_grant_gifts %}
+            <form action="{{ url_for('admin_grant_gift') }}" method="POST" class="bg-gray-800 p-4 rounded-2xl border border-gray-700 flex flex-col gap-2.5 shadow">
+                <div class="font-black text-blue-400 text-sm flex items-center gap-1"><span>🎁</span><span>Выдать официальный подарок</span></div>
+                <select name="user_id" class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
+                    {% for u in users %}<option value="{{ u.id }}">{{ u.username }} ({{ u.first_name }})</option>{% endfor %}
+                </select>
+                <select name="def_id" class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
+                    <option value="1">Песочный замок (1)</option>
+                    <option value="2">Пляжный зонт (2)</option>
+                    <option value="3">Шезлонг (3)</option>
+                    <option value="4">Спасательный круг (4)</option>
+                </select>
+                <button type="submit" class="bg-blue-600 hover:bg-blue-500 text-white font-black py-2 rounded-xl text-xs transition">Подарить</button>
+            </form>
+            {% endif %}
+        </div>
 
         <div class="bg-gray-800 rounded-xl shadow-xl border border-gray-700 overflow-x-auto">
             <table class="w-full text-left border-collapse min-w-[750px]">
                 <thead>
                     <tr class="bg-gray-900 border-b border-gray-700 text-gray-400 uppercase text-[10px] md:text-xs">
-                         <th class="p-3 md:p-4">ID</th>
-                        <th class="p-3 md:p-4">Пользователь / Ник</th>
-                        <th class="p-3 md:p-4">Статус</th>
-                        <th class="p-3 md:p-4 text-right">Действия</th>
+                        <th class="p-3 md:p-4">ID</th><th class="p-3 md:p-4">Пользователь / Ник</th><th class="p-3 md:p-4">Статус</th><th class="p-3 md:p-4 text-right">Действия</th>
                     </tr>
                 </thead>
                 <tbody class="text-xs md:text-sm">
                     {% for u in users %}
                     <tr class="border-b border-gray-700 hover:bg-gray-750 transition">
-                         <td class="p-3 md:p-4 text-gray-500">#{{ u.id }}</td>
+                        <td class="p-3 md:p-4 text-gray-500">#{{ u.id }}</td>
                         <td class="p-3 md:p-4">
                             <div class="font-semibold text-white flex items-center gap-2">
                                  {{ u.first_name }} {{ u.last_name or '' }}
@@ -1366,20 +1622,20 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                                 {% if u.is_moderator %}<span class="mod-badge">Moderator</span>{% endif %}
                                 {% if u.banned_until %}<span class="bg-red-950 border border-red-700 text-red-400 px-1.5 py-0.5 rounded text-[10px] font-bold">Banned</span>{% endif %}
                             </div>
-                            <div class="text-[10px] md:text-xs text-blue-400">@{{ u.username }}</div>
+                            <div class="text-[10px] md:text-xs text-blue-400 flex items-center gap-2">
+                                <span>@{{ u.username }}</span><span class="text-green-400 font-mono font-bold">{{ u.lightnings or 0 }}⚡</span>
+                            </div>
                         </td>
                         <td class="p-3 md:p-4 text-gray-400">
                             {% if u.id in connected %} <span class="text-blue-500 font-bold">В сети</span> 
-                            {% else %} Был(а) {{ format_last_seen(u.last_seen) }}
-                             {% endif %}
+                            {% else %} Был(а) {{ format_last_seen(u.last_seen) }}{% endif %}
                         </td>
                         <td class="p-3 md:p-4 text-right space-x-1 md:space-x-2">
                             <button @click="openHistory({{ u.id }}, '{{ u.first_name }} {{ u.last_name or '' }}')" class="inline-block bg-indigo-900/50 hover:bg-indigo-800 text-indigo-300 border border-indigo-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">Список общения</button>
                             
                             {% if can_ban_users %}
                                 {% if u.id != current_user.id and not u.is_admin %}
-                                    <button @click="openBanModal({{ u.id }}, '{{ u.first_name }} {{ u.last_name or '' }}', '{{ 'forever' if u.banned_until and u.banned_until.year >= 9999 else (u.banned_until.strftime('%Y-%m-%dT%H:%M') if u.banned_until else '') }}')" 
-                                            class="inline-block bg-red-900/50 hover:bg-red-800 text-red-300 border border-red-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">
+                                    <button @click="openBanModal({{ u.id }}, '{{ u.first_name }} {{ u.last_name or '' }}', '{{ 'forever' if u.banned_until and u.banned_until.year >= 9999 else (u.banned_until.strftime('%Y-%m-%dT%H:%M') if u.banned_until else '') }}')" class="inline-block bg-red-900/50 hover:bg-red-800 text-red-300 border border-red-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">
                                         {{ 'Разблокировать' if u.banned_until else 'Блокировка' }}
                                     </button>
                                 {% endif %}
@@ -1387,14 +1643,11 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
 
                             {% if has_admin_priv %}
                                 {% if u.id != current_user.id %}
-                                    <button @click="openPerms({ id: {{ u.id }}, is_admin: {{ 'true' if u.is_admin else 'false' }}, is_moderator: {{ 'true' if u.is_moderator else 'false' }}, perm_edit_history: {{ 'true' if u.perm_edit_history else 'false' }}, perm_deleted_messages: {{ 'true' if u.perm_deleted_messages else 'false' }}, perm_see_chatting_with: {{ 'true' if u.perm_see_chatting_with else 'false' }}, perm_ban_users: {{ 'true' if u.perm_ban_users else 'false' }} })" class="inline-block bg-green-900/50 hover:bg-green-800 text-green-300 border border-green-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">Управление правами</button>
-                                    
+                                    <button @click="openPerms({ id: {{ u.id }}, is_admin: {{ 'true' if u.is_admin else 'false' }}, is_moderator: {{ 'true' if u.is_moderator else 'false' }}, perm_edit_history: {{ 'true' if u.perm_edit_history else 'false' }}, perm_deleted_messages: {{ 'true' if u.perm_deleted_messages else 'false' }}, perm_see_chatting_with: {{ 'true' if u.perm_see_chatting_with else 'false' }}, perm_ban_users: {{ 'true' if u.perm_ban_users else 'false' }}, perm_grant_gifts: {{ 'true' if u.perm_grant_gifts else 'false' }}, perm_grant_lightnings: {{ 'true' if u.perm_grant_lightnings else 'false' }} })" class="inline-block bg-green-900/50 hover:bg-green-800 text-green-300 border border-green-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">Управление правами</button>
                                     {% if current_user.promoted_by_id != u.id %}
                                          <a href="{{ url_for('impersonate', target_id=u.id) }}" class="inline-block bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition shadow">Войти как</a>
                                     {% endif %}
-                                {% else %}
-                                    <span class="text-gray-600 text-[10px] md:text-xs italic">Это вы</span>
-                                {% endif %}
+                                {% else %}<span class="text-gray-600 text-[10px] md:text-xs italic">Это вы</span>{% endif %}
                              {% endif %}
                         </td>
                     </tr>
@@ -1404,39 +1657,21 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
         </div>
 
         <div x-show="showPermsModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="showPermsModal = false">
-            <div class="bg-[#1e293b] p-6 rounded-xl border border-gray-700 w-full max-w-sm shadow-2xl">
+            <div class="bg-[#1e293b] p-6 rounded-2xl border border-gray-700 w-full max-w-sm shadow-2xl">
                 <h3 class="text-white font-bold text-lg mb-4 border-b border-gray-700 pb-2">Права пользователя</h3>
-                
-                <div class="space-y-3 mb-6">
-                    <label class="flex items-center gap-3 cursor-pointer">
-                        <input type="checkbox" x-model="permsUser.is_admin" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded">
-                        <span class="text-sm font-medium text-red-400">sudo admin</span>
-                    </label>
-                    <label class="flex items-center gap-3 cursor-pointer">
-                        <input type="checkbox" x-model="permsUser.is_moderator" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded">
-                        <span class="text-sm font-medium text-green-400">sudo moderate</span>
-                    </label>
-                    <label class="flex items-center gap-3 cursor-pointer">
-                        <input type="checkbox" x-model="permsUser.perm_ban_users" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded">
-                        <span class="text-sm font-medium text-purple-400">sudo блокировка</span>
-                    </label>
-                    <label class="flex items-center gap-3 cursor-pointer">
-                        <input type="checkbox" x-model="permsUser.perm_edit_history" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded">
-                        <span class="text-sm font-medium text-gray-300">sudo история изменений</span>
-                    </label>
-                    <label class="flex items-center gap-3 cursor-pointer">
-                        <input type="checkbox" x-model="permsUser.perm_deleted_messages" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded">
-                        <span class="text-sm font-medium text-gray-300">sudo удаленные сообщения</span>
-                    </label>
-                    <label class="flex items-center gap-3 cursor-pointer">
-                        <input type="checkbox" x-model="permsUser.perm_see_chatting_with" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded">
-                        <span class="text-sm font-medium text-gray-300">sudo с кем общается</span>
-                     </label>
+                <div class="space-y-2.5 mb-6 max-h-60 overflow-y-auto pr-1">
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.is_admin" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-red-400">sudo admin</span></label>
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.is_moderator" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-green-400">sudo moderate</span></label>
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.perm_ban_users" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-purple-400">sudo блокировка</span></label>
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.perm_grant_gifts" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-pink-400">sudo выдача подарков</span></label>
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.perm_grant_lightnings" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-yellow-400">sudo выдача молний</span></label>
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.perm_edit_history" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-gray-300">sudo история изменений</span></label>
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.perm_deleted_messages" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-gray-300">sudo удаленные сообщения</span></label>
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.perm_see_chatting_with" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-gray-300">sudo с кем общается</span></label>
                 </div>
-
                 <div class="flex gap-2">
-                    <button @click="savePerms()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 rounded transition">Сохранить</button>
-                    <button @click="showPermsModal = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 rounded transition">Отмена</button>
+                    <button @click="savePerms()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 rounded-xl transition text-sm">Сохранить</button>
+                    <button @click="showPermsModal = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-bold py-2.5 rounded-xl transition text-sm">Отмена</button>
                 </div>
             </div>
         </div>
@@ -1444,25 +1679,16 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
         <div x-show="showBanModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="showBanModal = false">
             <div class="bg-[#1e293b] p-6 rounded-xl border border-red-700 w-full max-w-sm shadow-2xl">
                 <h3 class="text-red-400 font-bold text-lg mb-4 border-b border-gray-700 pb-2">Блокировка: <span class="text-white" x-text="banTargetName"></span></h3>
-                
                 <div class="space-y-4 mb-6">
                     <div>
-                        <label class="flex items-center gap-2 cursor-pointer mb-2">
-                            <input type="radio" name="bmode" value="forever" x-model="banMode" class="text-red-600 bg-gray-700 border-gray-600">
-                            <span class="text-sm text-white font-semibold">Вечная блокировка</span>
-                        </label>
-                        <label class="flex items-center gap-2 cursor-pointer">
-                            <input type="radio" name="bmode" value="temporary" x-model="banMode" class="text-red-600 bg-gray-700 border-gray-600">
-                            <span class="text-sm text-white font-semibold">Свое время блокировки</span>
-                        </label>
+                        <label class="flex items-center gap-2 cursor-pointer mb-2"><input type="radio" name="bmode" value="forever" x-model="banMode" class="text-red-600 bg-gray-700 border-gray-600"><span class="text-sm text-white font-semibold">Вечная блокировка</span></label>
+                        <label class="flex items-center gap-2 cursor-pointer"><input type="radio" name="bmode" value="temporary" x-model="banMode" class="text-red-600 bg-gray-700 border-gray-600"><span class="text-sm text-white font-semibold">Свое время блокировки</span></label>
                     </div>
-
                     <div x-show="banMode === 'temporary'" class="pt-2">
                         <label class="text-xs text-gray-400 block mb-1">Разблокировать в (МСК):</label>
                         <input type="datetime-local" x-model="banCustomDate" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white text-sm focus:ring-1 focus:ring-red-500">
                     </div>
                 </div>
-
                 <div class="flex flex-col gap-2">
                     <div class="flex gap-2">
                         <button @click="executeBan()" class="flex-1 bg-red-600 hover:bg-red-500 text-white font-bold py-2 rounded transition">Применить</button>
@@ -1476,24 +1702,17 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
         <div x-show="showHistoryModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="showHistoryModal = false">
             <div class="bg-[#1e293b] p-6 rounded-xl border border-gray-700 w-full max-w-lg shadow-2xl flex flex-col max-h-[80vh]">
                 <h3 class="text-white font-bold text-lg mb-4 border-b border-gray-700 pb-2">Общение за 24ч: <span class="text-blue-400" x-text="historyUserName"></span></h3>
-                
                 <div class="flex-1 overflow-y-auto mb-4">
-                    <template x-if="historyData.length === 0">
-                        <div class="text-gray-500 text-sm italic text-center py-4">Нет активности за последние сутки.</div>
-                    </template>
+                    <template x-if="historyData.length === 0"><div class="text-gray-500 text-sm italic text-center py-4">Нет активности за последние сутки.</div></template>
                     <div class="space-y-2">
                          <template x-for="item in historyData" :key="item.username">
                             <div class="bg-gray-800 p-3 rounded border border-gray-700 flex justify-between items-center">
-                                <div>
-                                     <div class="text-sm font-bold text-white" x-text="item.name"></div>
-                                    <div class="text-xs text-blue-400" x-text="'@' + item.username"></div>
-                                </div>
+                                <div><div class="text-sm font-bold text-white" x-text="item.name"></div><div class="text-xs text-blue-400" x-text="'@' + item.username"></div></div>
                                 <div class="text-xs font-mono text-gray-400 bg-gray-900 px-2 py-1 rounded" x-text="item.time_range"></div>
                             </div>
                         </template>
                      </div>
                 </div>
-
                 <button @click="showHistoryModal = false" class="w-full bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 rounded transition">Закрыть</button>
             </div>
         </div>
@@ -1515,14 +1734,10 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                 banMode: 'temporary',
                 banCustomDate: '',
 
-                openPerms(userData) {
-                    this.permsUser = userData;
-                    this.showPermsModal = true;
-                },
+                openPerms(userData) { this.permsUser = userData; this.showPermsModal = true; },
                 async savePerms() {
                     await fetch('/api/admin/permissions/' + this.permsUser.id, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify(this.permsUser)
                     });
                     location.reload();
@@ -1535,14 +1750,10 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                 },
 
                 openBanModal(id, name, currentBan) {
-                    this.banTargetId = id;
-                    this.banTargetName = name;
-                    if (currentBan === 'forever') {
-                        this.banMode = 'forever';
-                    } else if (currentBan !== '') {
-                        this.banMode = 'temporary';
-                        this.banCustomDate = currentBan;
-                    } else {
+                    this.banTargetId = id; this.banTargetName = name;
+                    if (currentBan === 'forever') this.banMode = 'forever';
+                    else if (currentBan !== '') { this.banMode = 'temporary'; this.banCustomDate = currentBan; }
+                    else {
                         this.banMode = 'temporary';
                         let tomorrow = new Date(Date.now() + 86400000);
                         let tzoffset = tomorrow.getTimezoneOffset() * 60000;
@@ -1552,16 +1763,14 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                 },
                 async executeBan() {
                     await fetch('/api/admin/ban/' + this.banTargetId, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({ action: 'ban', type: this.banMode, until: this.banCustomDate })
                     });
                     location.reload();
                 },
                 async executeUnban() {
                     await fetch('/api/admin/ban/' + this.banTargetId, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({ action: 'unban' })
                     });
                     location.reload();
@@ -1569,12 +1778,11 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
             }
         }
     </script>
-</body>
-</html>
+</body></html>
 """
 
 # ==========================================
-# МАРШРУТЫ (АВТОРИЗАЦИЯ И ПАНЕЛЬ)
+# МАРШРУТЫ И РОУТЫ КАРТИНОК
 # ==========================================
 @app.route('/logo.png')
 def serve_logo():
@@ -1587,6 +1795,14 @@ def serve_instruction_screenshot(num):
         if os.path.exists(os.path.join(os.getcwd(), fname)):
             return send_from_directory(os.getcwd(), fname)
     return "Скриншот не найден", 404
+
+# НОВОЕ: Универсальный роут для картинок подарков из корня проекта!
+@app.route('/podarok<int:num>.png')
+def serve_gift_png(num):
+    fname = f"podarok{num}.png"
+    if os.path.exists(os.path.join(os.getcwd(), fname)):
+        return send_from_directory(os.getcwd(), fname)
+    return "Подарок не найден", 404
 
 @app.route('/micro')
 @login_required
@@ -1610,15 +1826,13 @@ def login():
                 return redirect(url_for('login'))
 
             new_user = User(
-                username=clean_un,
-                password=password,
+                username=clean_un, password=password,
                 first_name=request.form.get('first_name'),
                 last_name=request.form.get('last_name') or None,
                 last_seen=now_msk()
             )
             db.session.add(new_user)
             db.session.commit()
-            
             login_user(new_user)
             return redirect(url_for('index'))
 
@@ -1628,7 +1842,6 @@ def login():
             if user:
                 login_user(user)
                 return redirect(url_for('index'))
- 
             flash('Неверный логин или пароль')
 
     return render_template_string(LOGIN_TEMPLATE)
@@ -1652,14 +1865,13 @@ def index():
     return render_template_string(APP_TEMPLATE)
 
 # ==========================================
-# API ДЛЯ ПРОФИЛЯ, КОНТАКТОВ И БЛОКОВ
+# API ПРОФИЛЯ, ПОДАРКОВ, КВЕСТОВ И МАГАЗИНА
 # ==========================================
 @app.route('/api/profile/me', methods=['GET', 'POST'])
 @login_required
 def my_profile():
     if request.method == 'POST':
         data = request.json or {}
-        
         current_user.first_name = data.get('first_name', current_user.first_name)
         current_user.last_name = data.get('last_name') or None
         current_user.phone = data.get('phone')
@@ -1677,8 +1889,7 @@ def my_profile():
         if 'privacy_last_seen' in data: current_user.privacy_last_seen = data['privacy_last_seen']
 
         new_pwd = data.get('new_password')
-        if new_pwd and new_pwd.strip() != "":
-            current_user.password = new_pwd.strip()
+        if new_pwd and new_pwd.strip() != "": current_user.password = new_pwd.strip()
 
         if current_user.username.lower() != 'admin':
             new_username = data.get('username')
@@ -1697,36 +1908,29 @@ def my_profile():
         parts = bd.split(".")
         if len(parts) == 3: b_day, b_month, b_year = parts
 
+    pinned = UserGift.query.filter_by(owner_id=current_user.id, is_pinned=True).all()
+    pinned_data = [{
+        'user_gift_id': p.id, 'slot_index': p.slot_index, 'name': p.gift_def.name,
+        'img': f"/podarok{p.gift_def.id}.png", 'store_price': p.gift_def.price,
+        'is_pinned': True, 'is_for_sale': p.is_for_sale, 'sale_price': p.sale_price
+    } for p in pinned]
+
     return jsonify({
-        'id': current_user.id,
-        'first_name': current_user.first_name,
-        'last_name': current_user.last_name,
-        'username': current_user.username,
-        'avatar': current_user.avatar_url,
-        'phone': current_user.phone,
-        'about_me': current_user.about_me,
-        'birth_day': b_day,
-        'birth_month': b_month,
-        'birth_year': b_year,
-        'formatted_bday': format_bday(current_user.birth_date),
-        'privacy_phone': current_user.privacy_phone,
-        'privacy_bday': current_user.privacy_bday,
-        'privacy_last_seen': current_user.privacy_last_seen,
-        'is_admin': current_user.is_admin,
-        'is_moderator': current_user.is_moderator,
-        'has_admin_priv': has_admin_priv(),
-        'can_see_deleted': can_see_deleted(),
-        'can_see_edits': can_see_edits(),
-        'perm_see_chatting_with': can_see_chatting(),
-        'can_ban_users': can_ban_users(),
-        'is_online': True
+        'id': current_user.id, 'first_name': current_user.first_name, 'last_name': current_user.last_name,
+        'username': current_user.username, 'avatar': current_user.avatar_url, 'phone': current_user.phone,
+        'about_me': current_user.about_me, 'birth_day': b_day, 'birth_month': b_month, 'birth_year': b_year,
+        'formatted_bday': format_bday(current_user.birth_date), 'privacy_phone': current_user.privacy_phone,
+        'privacy_bday': current_user.privacy_bday, 'privacy_last_seen': current_user.privacy_last_seen,
+        'is_admin': current_user.is_admin, 'is_moderator': current_user.is_moderator,
+        'has_admin_priv': has_admin_priv(), 'can_see_deleted': can_see_deleted(), 'can_see_edits': can_see_edits(),
+        'perm_see_chatting_with': can_see_chatting(), 'can_ban_users': can_ban_users(),
+        'lightnings': current_user.lightnings or 0, 'pinned_gifts': pinned_data, 'is_online': True
     })
 
 @app.route('/api/profile/<int:user_id>')
 @login_required
 def get_user_profile(user_id):
     user = User.query.get_or_404(user_id)
-    
     show_ls = is_allowed_to_see(user, user.privacy_last_seen, current_user.id)
     last_seen_str = format_last_seen_str(user.last_seen) if show_ls else "недавно"
 
@@ -1742,24 +1946,172 @@ def get_user_profile(user_id):
     show_phone = is_allowed_to_see(user, user.privacy_phone, current_user.id)
     show_bday = is_allowed_to_see(user, user.privacy_bday, current_user.id)
 
-    data = {
-        'id': user.id,
-        'first_name': user.first_name,
-        'last_name': user.last_name,
-        'display_name': disp_name,
-        'username': user.username,
-        'avatar': user.avatar_url,
-        'is_admin': user.is_admin,
-        'is_moderator': user.is_moderator,
-        'is_online': user.id in connected_users,
-        'last_seen': last_seen_str,
-        'custom_status': custom_status,
-        'phone': user.phone if show_phone else None,
-        'about_me': user.about_me,
-        'formatted_bday': format_bday(user.birth_date) if show_bday else None
-    }
-    return jsonify(data)
+    pinned = UserGift.query.filter_by(owner_id=user.id, is_pinned=True).all()
+    pinned_data = [{
+        'user_gift_id': p.id, 'slot_index': p.slot_index, 'name': p.gift_def.name,
+        'img': f"/podarok{p.gift_def.id}.png", 'store_price': p.gift_def.price,
+        'is_pinned': True, 'is_for_sale': p.is_for_sale, 'sale_price': p.sale_price
+    } for p in pinned]
 
+    return jsonify({
+        'id': user.id, 'first_name': user.first_name, 'last_name': user.last_name,
+        'display_name': disp_name, 'username': user.username, 'avatar': user.avatar_url,
+        'is_admin': user.is_admin, 'is_moderator': user.is_moderator, 'is_online': user.id in connected_users,
+        'last_seen': last_seen_str, 'custom_status': custom_status, 'phone': user.phone if show_phone else None,
+        'about_me': user.about_me, 'formatted_bday': format_bday(user.birth_date) if show_bday else None,
+        'pinned_gifts': pinned_data
+    })
+
+# ==========================================
+# НОВОЕ API: КВЕСТЫ, МАГАЗИН И ПОДАРКИ
+# ==========================================
+@app.route('/api/quests', methods=['GET'])
+@login_required
+def get_daily_quests():
+    q = get_or_create_quest(current_user.id)
+    u = current_user
+    q3_ready = bool(u.about_me and u.phone and u.birth_date)
+
+    quests_map = {
+        'q1': {'name': 'Написать 10 сообщений кому нибудь', 'progress': min(q.messages_sent, 10), 'target': 10, 'claimed': q.q1_claimed, 'reward': 5},
+        'q2': {'name': 'Получить 2 ответа на сообщения', 'progress': min(q.replies_received, 2), 'target': 2, 'claimed': q.q2_claimed, 'reward': 7},
+        'q3': {'name': 'Заполнить информацию о себе', 'progress': 1 if q3_ready else 0, 'target': 1, 'claimed': u.q3_claimed, 'reward': 20},
+        'q4': {'name': 'Отправить 2 фотографии', 'progress': min(q.photos_sent, 2), 'target': 2, 'claimed': q.q4_claimed, 'reward': 3}
+    }
+    return jsonify({'lightnings': u.lightnings or 0, 'quests': quests_map})
+
+@app.route('/api/quests/claim', methods=['POST'])
+@login_required
+def claim_quest_reward():
+    qid = request.json.get('quest_id')
+    q = get_or_create_quest(current_user.id)
+    u = current_user
+    rw = 0
+
+    if qid == 'q1' and q.messages_sent >= 10 and not q.q1_claimed: q.q1_claimed = True; rw = 5
+    elif qid == 'q2' and q.replies_received >= 2 and not q.q2_claimed: q.q2_claimed = True; rw = 7
+    elif qid == 'q3' and (u.about_me and u.phone and u.birth_date) and not u.q3_claimed: u.q3_claimed = True; rw = 20
+    elif qid == 'q4' and q.photos_sent >= 2 and not q.q4_claimed: q.q4_claimed = True; rw = 3
+    else: return jsonify({'success': False, 'error': 'Задание не выполнено или уже забрано'})
+
+    u.lightnings = (u.lightnings or 0) + rw
+    db.session.commit()
+    return jsonify({'success': True, 'total': u.lightnings})
+
+@app.route('/api/shop', methods=['GET'])
+@login_required
+def get_gifts_shop():
+    defs = GiftDefinition.query.all()
+    market = UserGift.query.filter_by(is_for_sale=True).all()
+
+    off_list = [{
+        'def_id': d.id, 'name': d.name, 'price': d.price, 'img': f"/podarok{d.id}.png"
+    } for d in defs]
+
+    mkt_list = [{
+        'user_gift_id': m.id, 'name': m.gift_def.name, 'price': m.sale_price,
+        'store_price': m.gift_def.price, 'img': f"/podarok{m.gift_def.id}.png",
+        'seller': m.owner.username, 'seller_id': m.owner.id
+    } for m in market if m.owner_id != current_user.id]
+
+    return jsonify({'new_store': off_list, 'user_market': mkt_list})
+
+@app.route('/api/gifts/my', methods=['GET'])
+@login_required
+def get_my_all_gifts():
+    my = UserGift.query.filter_by(owner_id=current_user.id).order_by(UserGift.id.desc()).all()
+    res = [{
+        'user_gift_id': g.id, 'name': g.gift_def.name, 'store_price': g.gift_def.price,
+        'img': f"/podarok{g.gift_def.id}.png", 'is_pinned': g.is_pinned,
+        'slot_index': g.slot_index, 'is_for_sale': g.is_for_sale, 'sale_price': g.sale_price
+    } for g in my]
+    return jsonify(res)
+
+@app.route('/api/shop/buy_official', methods=['POST'])
+@login_required
+def buy_official_gift_endpoint():
+    def_id = request.json.get('def_id')
+    gdef = GiftDefinition.query.get(def_id)
+    if not gdef or (current_user.lightnings or 0) < gdef.price:
+        return jsonify({'success': False, 'error': 'Недостаточно молний'})
+
+    current_user.lightnings -= gdef.price
+    ug = UserGift(owner_id=current_user.id, gift_def_id=gdef.id)
+    db.session.add(ug)
+    db.session.commit()
+    return jsonify({'success': True, 'new_balance': current_user.lightnings})
+
+@app.route('/api/shop/buy_market', methods=['POST'])
+@login_required
+def buy_market_gift_endpoint():
+    ug_id = request.json.get('user_gift_id')
+    ug = UserGift.query.filter_by(id=ug_id, is_for_sale=True).first()
+    if not ug: return jsonify({'success': False, 'error': 'Подарок уже продан'})
+    if ug.owner_id == current_user.id: return jsonify({'success': False, 'error': 'Нельзя купить у себя'})
+    if (current_user.lightnings or 0) < ug.sale_price: return jsonify({'success': False, 'error': 'Недостаточно молний'})
+
+    seller = User.query.get(ug.owner_id)
+    current_user.lightnings -= ug.sale_price
+    seller.lightnings = (seller.lightnings or 0) + ug.sale_price
+
+    ug.owner_id = current_user.id
+    ug.is_for_sale = False
+    ug.sale_price = None
+    ug.is_pinned = False
+    ug.slot_index = None
+    db.session.commit()
+    return jsonify({'success': True, 'new_balance': current_user.lightnings})
+
+@app.route('/api/gifts/pin', methods=['POST'])
+@login_required
+def pin_gift_to_slot():
+    ug_id = request.json.get('user_gift_id')
+    slot = request.json.get('slot_index')
+    if slot not in [0, 1, 2, 3]: return jsonify({'success': False})
+
+    ug = UserGift.query.filter_by(id=ug_id, owner_id=current_user.id).first()
+    if not ug: return jsonify({'success': False})
+
+    old = UserGift.query.filter_by(owner_id=current_user.id, is_pinned=True, slot_index=slot).first()
+    if old: old.is_pinned = False; old.slot_index = None
+
+    ug.is_pinned = True
+    ug.slot_index = slot
+    ug.is_for_sale = False
+    db.session.commit()
+    return jsonify({'success': True})
+
+@app.route('/api/gifts/unpin', methods=['POST'])
+@login_required
+def unpin_gift_slot():
+    slot = request.json.get('slot_index')
+    ug = UserGift.query.filter_by(owner_id=current_user.id, is_pinned=True, slot_index=slot).first()
+    if ug: ug.is_pinned = False; ug.slot_index = None; db.session.commit()
+    return jsonify({'success': True})
+
+@app.route('/api/gifts/market_toggle', methods=['POST'])
+@login_required
+def toggle_gift_market_sale():
+    ug_id = request.json.get('user_gift_id')
+    price = request.json.get('price')
+
+    ug = UserGift.query.filter_by(id=ug_id, owner_id=current_user.id).first()
+    if not ug: return jsonify({'success': False})
+
+    if ug.is_for_sale: ug.is_for_sale = False; ug.sale_price = None
+    else:
+        try:
+            p = int(price)
+            if p <= 0: raise ValueError
+            ug.is_for_sale = True; ug.sale_price = p; ug.is_pinned = False; ug.slot_index = None
+        except: return jsonify({'success': False, 'error': 'Неверная цена'})
+
+    db.session.commit()
+    return jsonify({'success': True, 'is_for_sale': ug.is_for_sale})
+
+# ==========================================
+# МАРШРУТЫ КОНТАКТОВ И БЛОКОВ
+# ==========================================
 @app.route('/api/contact/save/<int:partner_id>', methods=['POST'])
 @login_required
 def save_contact_endpoint(partner_id):
@@ -1798,9 +2150,6 @@ def toggle_personal_block_endpoint(partner_id):
     socketio.emit('block_status_changed', {'chat_id': cid}, room=f"user_{partner_id}", namespace='/')
     return jsonify({'status': status})
 
-# ==========================================
-# API ДЛЯ ЧАТОВ И ПОИСКА
-# ==========================================
 @app.route('/api/chats')
 @login_required
 def get_chats():
@@ -1838,21 +2187,14 @@ def get_chats():
             elif last_msg.image_base64: lmsg_preview = '[Фото]'
 
         chats_data.append({
-            'chat_id': cid,
-            'partner_id': partner.id,
-            'partner_name': disp_name,
+            'chat_id': cid, 'partner_id': partner.id, 'partner_name': disp_name,
             'contact_custom_name': contact.custom_name if contact else '',
-            'is_explicit_contact': contact is not None,
-            'partner_is_admin': partner.is_admin,
-            'partner_is_moderator': partner.is_moderator,
-            'partner_is_banned': partner_banned,
-            'i_blocked_partner': i_blocked,
-            'partner_blocked_me': partner_blocked,
-            'custom_status': custom_status,
-            'last_message': lmsg_preview,
+            'is_explicit_contact': contact is not None, 'partner_is_admin': partner.is_admin,
+            'partner_is_moderator': partner.is_moderator, 'partner_is_banned': partner_banned,
+            'i_blocked_partner': i_blocked, 'partner_blocked_me': partner_blocked,
+            'custom_status': custom_status, 'last_message': lmsg_preview,
             'last_time': last_msg.timestamp.strftime('%H:%M') if last_msg else '',
-            'is_online': partner.id in connected_users,
-            'last_seen': ls_str
+            'is_online': partner.id in connected_users, 'last_seen': ls_str
         })
     return jsonify(chats_data)
 
@@ -1872,13 +2214,8 @@ def search_users():
         ).limit(10).all()
 
     return jsonify([{
-        'id': u.id,
-        'first_name': u.first_name,
-        'last_name': u.last_name,
-        'username': u.username,
-        'avatar': u.avatar_url,
-        'is_admin': u.is_admin,
-        'is_moderator': u.is_moderator
+        'id': u.id, 'first_name': u.first_name, 'last_name': u.last_name,
+        'username': u.username, 'avatar': u.avatar_url, 'is_admin': u.is_admin, 'is_moderator': u.is_moderator
     } for u in users])
 
 @app.route('/api/chat/start/<int:target_id>', methods=['POST'])
@@ -1888,8 +2225,7 @@ def start_chat(target_id):
     target_chats = set(cp.chat_id for cp in ChatParticipant.query.filter_by(user_id=target_id).all())
     common = my_chats.intersection(target_chats)
 
-    if common:
-        chat_id = list(common)[0]
+    if common: chat_id = list(common)[0]
     else:
         new_chat = Chat(type='private')
         db.session.add(new_chat)
@@ -1911,15 +2247,11 @@ def get_messages(chat_id):
     if unread_msgs:
         for msg in unread_msgs: msg.is_read = True
         db.session.commit()
-
         partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == chat_id, ChatParticipant.user_id != current_user.id).first()
-        if partner_cp:
-            socketio.emit('messages_read', {'chat_id': chat_id}, room=f"user_{partner_cp.user_id}", namespace='/')
+        if partner_cp: socketio.emit('messages_read', {'chat_id': chat_id}, room=f"user_{partner_cp.user_id}", namespace='/')
 
-    if can_see_deleted():
-        messages = Message.query.filter_by(chat_id=chat_id).order_by(Message.timestamp.asc()).all()
-    else:
-        messages = Message.query.filter_by(chat_id=chat_id, is_deleted=False).order_by(Message.timestamp.asc()).all()
+    if can_see_deleted(): messages = Message.query.filter_by(chat_id=chat_id).order_by(Message.timestamp.asc()).all()
+    else: messages = Message.query.filter_by(chat_id=chat_id, is_deleted=False).order_by(Message.timestamp.asc()).all()
 
     result = []
     see_edits = can_see_edits()
@@ -1954,13 +2286,41 @@ def get_messages(chat_id):
 @app.route('/admin')
 @login_required
 def admin_panel():
-    if not (has_admin_priv() or current_user.is_moderator or current_user.perm_ban_users):
+    if not (has_admin_priv() or current_user.is_moderator or current_user.perm_ban_users or current_user.perm_grant_gifts or current_user.perm_grant_lightnings):
         flash("Доступ запрещен")
         return redirect(url_for('index'))
     users = User.query.order_by(User.id.desc()).all()
     return render_template_string(ADMIN_TEMPLATE, users=users, connected=connected_users, 
                                   has_admin_priv=has_admin_priv(), can_ban_users=can_ban_users(),
                                   format_last_seen=format_last_seen_str)
+
+@app.route('/admin/grant_lightnings', methods=['POST'])
+@login_required
+def admin_grant_lightnings():
+    if not (has_admin_priv() or current_user.perm_grant_lightnings): abort(403)
+    uid = request.form.get('user_id')
+    amt = int(request.form.get('amount', 0))
+    u = User.query.get(uid)
+    if u and amt > 0:
+        u.lightnings = (u.lightnings or 0) + amt
+        db.session.commit()
+        flash(f"Начислено {amt}⚡ пользователю {u.username}", 'success')
+    return redirect(url_for('admin_panel'))
+
+@app.route('/admin/grant_gift', methods=['POST'])
+@login_required
+def admin_grant_gift():
+    if not (has_admin_priv() or current_user.perm_grant_gifts): abort(403)
+    uid = request.form.get('user_id')
+    def_id = request.form.get('def_id')
+    u = User.query.get(uid)
+    gdef = GiftDefinition.query.get(def_id)
+    if u and gdef:
+        ug = UserGift(owner_id=u.id, gift_def_id=gdef.id)
+        db.session.add(ug)
+        db.session.commit()
+        flash(f"Подарок {gdef.name} выдан пользователю {u.username}", 'success')
+    return redirect(url_for('admin_panel'))
 
 @app.route('/api/admin/permissions/<int:target_id>', methods=['POST'])
 @login_required
@@ -1975,6 +2335,8 @@ def update_permissions(target_id):
     target.perm_deleted_messages = data.get('perm_deleted_messages', False)
     target.perm_see_chatting_with = data.get('perm_see_chatting_with', False)
     target.perm_ban_users = data.get('perm_ban_users', False)
+    target.perm_grant_gifts = data.get('perm_grant_gifts', False)
+    target.perm_grant_lightnings = data.get('perm_grant_lightnings', False)
     db.session.commit()
     return jsonify({'status': 'ok'})
 
@@ -1989,8 +2351,7 @@ def admin_ban_user_endpoint(target_id):
     action = data.get('action')
     ban_type = data.get('type', action)
 
-    if action == 'unban' or ban_type == 'unban':
-        target.banned_until = None
+    if action == 'unban' or ban_type == 'unban': target.banned_until = None
     elif ban_type == 'forever' or action == 'forever':
         target.banned_until = datetime(9999, 12, 31, 23, 59, 59)
         socketio.emit('force_logout', {}, room=f"user_{target.id}", namespace='/')
@@ -2001,8 +2362,7 @@ def admin_ban_user_endpoint(target_id):
                 dt_str = until_str.replace("T", " ")[:16]
                 target.banned_until = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
                 socketio.emit('force_logout', {}, room=f"user_{target.id}", namespace='/')
-            except Exception:
-                return "Invalid date format", 400
+            except: return "Invalid date format", 400
 
     db.session.commit()
     broadcast_user_status(target.id)
@@ -2041,8 +2401,7 @@ def admin_history_24h(target_id):
 @login_required
 def impersonate(target_id):
     if not has_admin_priv(): return "Access denied", 403
-    if 'original_admin_id' not in session:
-        session['original_admin_id'] = current_user.id
+    if 'original_admin_id' not in session: session['original_admin_id'] = current_user.id
     target_user = User.query.get_or_404(target_id)
     login_user(target_user)
     return redirect(url_for('index'))
@@ -2079,8 +2438,7 @@ def broadcast_user_status(user_id):
 def handle_connect():
     if current_user.is_authenticated:
         banned, _, _ = check_user_banned(current_user)
-        if banned:
-            return False 
+        if banned: return False 
 
         join_room(f"user_{current_user.id}")
         connected_users[current_user.id] = request.sid
@@ -2094,10 +2452,7 @@ def handle_disconnect():
         if current_user.id in connected_users: del connected_users[current_user.id]
         if current_user.id in active_chat_views: del active_chat_views[current_user.id]
         u = User.query.get(current_user.id)
-        if u:
-            u.last_seen = now_msk()
-            db.session.commit()
-            broadcast_user_status(current_user.id)
+        if u: u.last_seen = now_msk(); db.session.commit(); broadcast_user_status(current_user.id)
 
 @socketio.on('open_chat')
 def handle_open_chat(data):
@@ -2122,23 +2477,27 @@ def handle_message(data):
     chat_id = data.get('chat_id')
     reply_to_id = data.get('reply_to_id')
     forwarded_from_id = data.get('forwarded_from_id')
+    text = data.get('text', '')
+    img = data.get('image_base64')
+    voice = data.get('voice_base64')
 
-    # Проверка на личный блок перед отправкой
     partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == chat_id, ChatParticipant.user_id != current_user.id).first()
     if partner_cp:
         block1 = PersonalBlock.query.filter_by(blocker_id=current_user.id, blocked_id=partner_cp.user_id).first()
         block2 = PersonalBlock.query.filter_by(blocker_id=partner_cp.user_id, blocked_id=current_user.id).first()
-        if block1 or block2:
-            return # Физически блокируем отправку пакета на уровне сокета
+        if block1 or block2: return 
 
     msg = Message(
         chat_id=chat_id, sender_id=current_user.id, 
-        text=data.get('text', ''), image_base64=data.get('image_base64'), 
-        voice_base64=data.get('voice_base64'),
+        text=text, image_base64=img, voice_base64=voice,
         reply_to_id=reply_to_id, forwarded_from_id=forwarded_from_id, is_read=False
     )
     db.session.add(msg)
     db.session.commit()
+
+    # ХУК НА КВЕСТЫ
+    has_photo = bool(img)
+    hook_track_message(current_user.id, reply_to_id, has_photo)
 
     reply_text = ""
     if reply_to_id:
@@ -2169,14 +2528,9 @@ def handle_edit_message(data):
     msg_id = data.get('message_id')
     new_text = data.get('text', '')
     msg = Message.query.get(msg_id)
-    
     if msg and (msg.sender_id == current_user.id or has_admin_priv()) and not msg.is_deleted:
-        if not msg.is_edited:
-            msg.original_text = msg.text
-            msg.is_edited = True
-        msg.text = new_text
-        db.session.commit()
-
+        if not msg.is_edited: msg.original_text = msg.text; msg.is_edited = True
+        msg.text = new_text; db.session.commit()
         for p in ChatParticipant.query.filter_by(chat_id=msg.chat_id).all():
             emit('message_updated', {'chat_id': msg.chat_id}, room=f"user_{p.user_id}")
 
@@ -2184,11 +2538,8 @@ def handle_edit_message(data):
 def handle_delete_message(data):
     msg_id = data.get('message_id')
     msg = Message.query.get(msg_id)
-    
     if msg and (msg.sender_id == current_user.id or has_admin_priv()):
-        msg.is_deleted = True
-        db.session.commit()
-
+        msg.is_deleted = True; db.session.commit()
         for p in ChatParticipant.query.filter_by(chat_id=msg.chat_id).all():
             emit('message_updated', {'chat_id': msg.chat_id}, room=f"user_{p.user_id}")
 
@@ -2198,7 +2549,6 @@ def handle_delete_message(data):
 def init_db():
     with app.app_context():
         db.create_all()
-
         try:
             db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE;"))
             db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_edited BOOLEAN DEFAULT FALSE;"))
@@ -2214,26 +2564,38 @@ def init_db():
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS perm_ban_users BOOLEAN DEFAULT FALSE;"))
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_until TIMESTAMP;"))
             
-            # Новые колонки для Контактов и Настроек Конфиденциальности
             db.session.execute(text("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS custom_name VARCHAR(50);"))
             db.session.execute(text("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS is_explicit BOOLEAN DEFAULT FALSE;"))
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_phone VARCHAR(20) DEFAULT 'everyone';"))
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_bday VARCHAR(20) DEFAULT 'everyone';"))
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_last_seen VARCHAR(20) DEFAULT 'everyone';"))
 
+            # НОВЫЕ ПОЛЯ ПОДАРКОВ И КВЕСТОВ
+            db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS lightnings INTEGER DEFAULT 0;"))
+            db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS q3_claimed BOOLEAN DEFAULT FALSE;"))
+            db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS perm_grant_gifts BOOLEAN DEFAULT FALSE;"))
+            db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS perm_grant_lightnings BOOLEAN DEFAULT FALSE;"))
+
             db.session.execute(text("ALTER TABLE users ALTER COLUMN last_name DROP NOT NULL;"))
             db.session.commit()
-            print("База данных успешно синхронизирована (Контакты и Конфиденциальность добавлены).")
+            
+            # Посев 4 стартовых подарков
+            if not GiftDefinition.query.first():
+                db.session.add_all([
+                    GiftDefinition(id=1, name="Песочный замок", image_filename="podarok1.png", price=250),
+                    GiftDefinition(id=2, name="Пляжный зонт", image_filename="podarok2.png", price=230),
+                    GiftDefinition(id=3, name="Шезлонг", image_filename="podarok3.png", price=200),
+                    GiftDefinition(id=4, name="Спасательный круг", image_filename="podarok4.png", price=300)
+                ])
+                db.session.commit()
+                print("Базовый магазин подарков (4 шт) создан.")
+
         except Exception as e:
             db.session.rollback()
-            print(f"Ошибка при обновлении структуры: {e}")
+            print(f"Ошибка обновления структуры БД: {e}")
 
         if not User.query.filter_by(username='admin').first():
-            admin = User(
-                username='admin', password='admin',
-                first_name='Admin', last_name='',
-                is_admin=True, last_seen=now_msk()
-            )
+            admin = User(username='admin', password='admin', first_name='Admin', last_name='', is_admin=True, last_seen=now_msk())
             db.session.add(admin)
             db.session.commit()
 
