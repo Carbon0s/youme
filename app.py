@@ -44,6 +44,19 @@ socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins="*")
 def now_msk():
     return datetime.utcnow() + timedelta(hours=3)
 
+def format_last_seen_str(dt):
+    if not dt:
+        return "недавно"
+    now = now_msk()
+    if dt.date() == now.date():
+        return f"в {dt.strftime('%H:%M')}"
+    else:
+        months = {1: "янв.", 2: "февр.", 3: "мар.", 4: "апр.", 5: "мая", 6: "июн.", 
+                  7: "июл.", 8: "авг.", 9: "сен.", 10: "окт.", 11: "ноя.", 12: "дек."}
+        m_str = months.get(dt.month, "")
+        t_str = dt.strftime("%H:%M")
+        return f"{dt.day} {m_str} {t_str}"
+
 def format_bday(bd_str):
     if not bd_str or "." not in bd_str:
         return "Не указана"
@@ -90,7 +103,7 @@ class User(UserMixin, db.Model):
     password = db.Column(db.String(100), nullable=False)
     first_name = db.Column(db.String(50), nullable=False)
     last_name = db.Column(db.String(50), nullable=True) 
-    class_name = db.Column(db.String(20), nullable=True) # Оставлено для совместимости БД, но в UI убрано
+    class_name = db.Column(db.String(20), nullable=True) 
 
     avatar_url = db.Column(db.Text, nullable=True)
     phone = db.Column(db.String(20), nullable=True)
@@ -102,7 +115,6 @@ class User(UserMixin, db.Model):
     show_about = db.Column(db.Boolean, default=True)
     show_birth_date = db.Column(db.Boolean, default=False)
 
-    # SUDO Права
     is_admin = db.Column(db.Boolean, default=False)
     is_moderator = db.Column(db.Boolean, default=False)
     perm_edit_history = db.Column(db.Boolean, default=False)
@@ -155,9 +167,8 @@ class Message(db.Model):
 def load_user(user_id):
     return User.query.get(int(user_id))
 
-# Глобальные словари состояний
 connected_users = {}
-active_chat_views = {} # user_id -> partner_id с которым открыт чат
+active_chat_views = {} 
 
 # ==========================================
 # HTML ШАБЛОНЫ (Jinja2 + Tailwind + Alpine)
@@ -203,13 +214,10 @@ BASE_HTML_HEAD = """
 BANNED_TEMPLATE = BASE_HTML_HEAD + """
     <div class="flex-1 flex items-center justify-center bg-gray-900 px-4">
         <div class="bg-gray-800 border border-red-950 p-8 rounded-2xl shadow-2xl max-w-md w-full flex flex-col items-center text-center">
-            
             <div class="w-20 h-20 rounded-full border-4 border-red-600 bg-black flex items-center justify-center shadow-lg mb-6">
                 <span class="text-white font-black text-4xl leading-none">!</span>
             </div>
-
             <h2 class="text-2xl font-bold text-red-500 mb-4">Вход ограничен</h2>
-
             <p class="text-gray-200 text-base md:text-lg mb-6 font-medium leading-relaxed">
                 {% if is_permanent %}
                     Вы были заблокированы навсегда
@@ -218,14 +226,51 @@ BANNED_TEMPLATE = BASE_HTML_HEAD + """
                     <span class="font-mono font-bold text-red-400 text-lg block mt-2">{{ ban_date_str }}</span>
                 {% endif %}
             </p>
-
             <div class="w-full border-t border-gray-700/80 pt-4 mt-2">
                 <span class="text-xs text-gray-400 tracking-wider">Администрация You`Me</span>
             </div>
-
             <div class="mt-6">
                 <a href="{{ url_for('logout') }}" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-4 py-2 rounded-full transition">Выйти из аккаунта</a>
             </div>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+MICRO_TEMPLATE = BASE_HTML_HEAD + """
+    <div class="flex-1 flex flex-col bg-gray-900 text-gray-100 p-4 md:p-6 max-w-4xl mx-auto w-full h-full select-none" x-data="{ step: 1, total: 5 }">
+        <div class="flex items-center justify-between pb-4 mb-4 border-b border-gray-800 flex-shrink-0">
+            <a href="{{ url_for('index') }}" class="flex items-center gap-2 text-blue-400 hover:text-blue-300 transition font-medium text-sm md:text-base">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                <span>Назад на главную</span>
+            </a>
+            <h1 class="text-base md:text-xl font-bold text-white">Инструкция по включению микрофона</h1>
+            <div class="w-20 hidden md:block"></div>
+        </div>
+
+        <div class="flex-1 flex flex-col items-center justify-center min-h-0 relative bg-black/40 rounded-xl border border-gray-800 p-2 md:p-4 overflow-hidden">
+            <img :src="'/screen' + step" alt="Шаг инструкции" class="max-w-full max-h-full object-contain rounded-lg shadow-2xl transition-all duration-300" onerror="this.src='https://placehold.co/600x400/1e293b/ffffff?text=Скриншот+' + step + '+отсутствует'">
+        </div>
+
+        <div class="flex items-center justify-between pt-4 mt-4 border-t border-gray-800 flex-shrink-0 gap-2 md:gap-4">
+            <button @click="if(step > 1) step--" :disabled="step === 1" 
+                    :class="step === 1 ? 'opacity-30 cursor-not-allowed bg-gray-800 text-gray-500' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg'"
+                    class="flex items-center gap-1 md:gap-2 px-4 md:px-6 py-2.5 rounded-full font-bold text-xs md:text-sm transition">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
+                <span>Назад</span>
+            </button>
+
+            <div class="font-mono text-xs md:text-base font-bold text-gray-400 bg-gray-800/80 px-4 py-1.5 rounded-full border border-gray-700">
+                Шаг <span class="text-white" x-text="step"></span> из <span x-text="total"></span>
+            </div>
+
+            <button @click="if(step < total) step++" :disabled="step === total"
+                    :class="step === total ? 'opacity-30 cursor-not-allowed bg-gray-800 text-gray-500' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg'"
+                    class="flex items-center gap-1 md:gap-2 px-4 md:px-6 py-2.5 rounded-full font-bold text-xs md:text-sm transition">
+                <span>Вперед</span>
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+            </button>
         </div>
     </div>
 </body>
@@ -236,7 +281,6 @@ LOGIN_TEMPLATE = BASE_HTML_HEAD + """
     <div class="flex-1 flex items-center justify-center bg-gray-900 px-4" x-data="{ isLogin: true }">
         <div class="bg-gray-800 p-6 md:p-8 rounded-xl shadow-2xl w-full max-w-md border border-gray-700">
             <h1 class="text-3xl font-bold text-center text-blue-500 mb-6 font-serif tracking-widest">You`me</h1>
-
             {% with messages = get_flashed_messages() %}
               {% if messages %}
                 <div class="bg-red-500/20 border border-red-500 text-red-200 p-3 rounded mb-4 text-center text-sm">
@@ -244,7 +288,6 @@ LOGIN_TEMPLATE = BASE_HTML_HEAD + """
                 </div>
               {% endif %}
             {% endwith %}
-
             <form x-show="isLogin" action="{{ url_for('login') }}" method="POST" class="space-y-4">
                 <input type="hidden" name="action" value="login">
                 <div>
@@ -256,7 +299,6 @@ LOGIN_TEMPLATE = BASE_HTML_HEAD + """
                 <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 md:py-2 rounded transition">Войти</button>
                 <p class="text-center text-sm text-gray-400 mt-4">Нет аккаунта? <a href="#" @click.prevent="isLogin = false" class="text-blue-400 hover:underline">Регистрация</a></p>
             </form>
-
             <form x-show="!isLogin" action="{{ url_for('login') }}" method="POST" class="space-y-4" style="display: none;">
                 <input type="hidden" name="action" value="register">
                 <div>
@@ -501,25 +543,34 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                 </button>
                             </template>
 
-                            <template x-if="!currentChat.partner_is_banned && !isRecording">
+                            <template x-if="!currentChat.partner_is_banned && showMicInstructionBanner">
+                                <div class="flex-1 bg-red-950/90 border border-red-700 text-red-100 rounded-2xl md:rounded-full px-4 py-2 md:py-3 flex flex-col md:flex-row items-center justify-center gap-1 text-center text-xs md:text-sm shadow-inner">
+                                    <span>Включите доступ приложению к микрофону в настройках и перезапустите приложение</span>
+                                    <a href="/micro" class="underline font-bold text-white hover:text-blue-300 whitespace-nowrap">(нажмите что бы получить инструкцию)</a>
+                                    <span class="font-bold text-red-400 whitespace-nowrap">— Запись не идет!</span>
+                                    <button @click="showMicInstructionBanner = false" class="ml-2 text-gray-400 hover:text-white font-bold text-sm hidden md:inline-block">✕</button>
+                                </div>
+                            </template>
+
+                            <template x-if="!currentChat.partner_is_banned && !isRecording && !showMicInstructionBanner">
                                 <label class="cursor-pointer p-2 text-gray-400 hover:text-blue-500 transition flex-shrink-0">
                                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
                                     <input type="file" class="hidden" accept="image/*" @change="handleImageSelect">
                                 </label>
                             </template>
 
-                            <template x-if="!currentChat.partner_is_banned && !isRecording">
+                            <template x-if="!currentChat.partner_is_banned && !isRecording && !showMicInstructionBanner">
                                 <input type="text" x-model="newMessage" @keydown.enter="sendMessage()" @input="sendTyping()" placeholder="Сообщение..." class="flex-1 min-w-0 bg-gray-800 text-sm md:text-base text-white rounded-full px-4 py-2 md:py-3 focus:outline-none focus:ring-1 focus:ring-blue-500 shadow-inner">
                             </template>
 
-                            <template x-if="!currentChat.partner_is_banned && isRecording">
+                            <template x-if="!currentChat.partner_is_banned && isRecording && !showMicInstructionBanner">
                                 <div class="flex-1 bg-red-950/60 border border-red-800 text-red-200 rounded-full px-4 py-2 md:py-3 flex items-center justify-center gap-2 font-mono font-bold animate-pulse">
                                     <div class="w-3 h-3 rounded-full bg-red-500"></div>
                                     <span x-text="formatTimer(recordTimer)"></span>
                                 </div>
                             </template>
 
-                            <template x-if="!currentChat.partner_is_banned && !isRecording">
+                            <template x-if="!currentChat.partner_is_banned && !isRecording && !showMicInstructionBanner">
                                 <button @click="sendMessage()" class="flex-shrink-0 bg-blue-600 hover:bg-blue-500 text-white rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center transition shadow-lg" :disabled="!newMessage.trim() && !imagePreview">
                                     <svg class="w-4 h-4 md:w-5 md:h-5 ml-1 transform -rotate-45" fill="currentColor" viewBox="0 0 20 20"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"></path></svg>
                                 </button>
@@ -689,7 +740,8 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             <input type="text" x-model="editProfileData.last_name" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500 mb-2">
 
                             <label class="text-[10px] md:text-xs text-gray-400">Имя пользователя (никнейм)</label>
-                            <input type="text" x-model="editProfileData.username" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500 mb-2">
+                            <input type="text" x-model="editProfileData.username" :disabled="editProfileData.username === 'admin'" :class="editProfileData.username === 'admin' ? 'opacity-50 cursor-not-allowed' : ''" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500 mb-2">
+                            <span x-show="editProfileData.username === 'admin'" class="text-[9px] text-red-400 block -mt-1 mb-2">Системный логин @admin изменить нельзя</span>
 
                             <label class="text-[10px] md:text-xs text-gray-400">День рождения</label>
                             <div class="flex gap-2">
@@ -756,6 +808,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 typing: {},
 
                 isRecording: false,
+                showMicInstructionBanner: false,
                 mediaRecorder: null,
                 audioChunks: [],
                 recordTimer: 0,
@@ -843,6 +896,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     this.currentChat = null;
                     this.replyToMessage = null;
                     this.editMessage = null;
+                    this.showMicInstructionBanner = false;
                     this.stopRecording();
                     this.socket.emit('close_chat');
                 },
@@ -985,6 +1039,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     this.currentChat = chat;
                     this.replyToMessage = null;
                     this.editMessage = null;
+                    this.showMicInstructionBanner = false;
                     this.stopRecording();
                     this.socket.emit('open_chat', { partner_id: chat.partner_id });
                     await this.reloadCurrentMessages();
@@ -1027,6 +1082,14 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 },
 
                 async toggleVoiceRecord() {
+                    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+                    
+                    if (isMobile && !localStorage.getItem('mic_mobile_instructed')) {
+                        this.showMicInstructionBanner = true;
+                        localStorage.setItem('mic_mobile_instructed', 'true');
+                        return;
+                    }
+
                     if (!this.isRecording) {
                         await this.startRecording();
                     } else {
@@ -1145,9 +1208,9 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                             </div>
                             <div class="text-[10px] md:text-xs text-blue-400">@{{ u.username }}</div>
                         </td>
-                        <td class="p-3 md:p-4 text-gray-500">
+                        <td class="p-3 md:p-4 text-gray-400">
                             {% if u.id in connected %} <span class="text-blue-500 font-bold">В сети</span> 
-                            {% else %} Был(а) {{ u.last_seen.strftime('%H:%M %d.%m') if u.last_seen else '-' }}
+                            {% else %} Был(а) {{ format_last_seen(u.last_seen) }}
                              {% endif %}
                         </td>
                         <td class="p-3 md:p-4 text-right space-x-1 md:space-x-2">
@@ -1357,6 +1420,19 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
 def serve_logo():
     return send_from_directory(os.getcwd(), 'logo.png')
 
+@app.route('/screen<int:num>')
+def serve_instruction_screenshot(num):
+    for ext in ['.jpg', '.png', '.jpeg', '.webp']:
+        fname = f"screen{num}{ext}"
+        if os.path.exists(os.path.join(os.getcwd(), fname)):
+            return send_from_directory(os.getcwd(), fname)
+    return "Скриншот не найден", 404
+
+@app.route('/micro')
+@login_required
+def micro_instruction_page():
+    return render_template_string(MICRO_TEMPLATE)
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated and not session.get('original_admin_id'):
@@ -1368,12 +1444,13 @@ def login():
         password = request.form.get('password')
 
         if action == 'register':
-            if User.query.filter_by(username=username).first():
+            clean_un = username.lstrip('@').strip()
+            if User.query.filter_by(username=clean_un).first():
                 flash('Пользователь с таким логином уже существует')
                 return redirect(url_for('login'))
 
             new_user = User(
-                username=username,
+                username=clean_un,
                 password=password,
                 first_name=request.form.get('first_name'),
                 last_name=request.form.get('last_name') or None,
@@ -1386,7 +1463,7 @@ def login():
             return redirect(url_for('index'))
 
         elif action == 'login':
-            clean_username = username.lstrip('@')
+            clean_username = username.lstrip('@').strip()
             user = User.query.filter_by(username=clean_username, password=password).first()
             if user:
                 login_user(user)
@@ -1421,15 +1498,13 @@ def index():
 @login_required
 def my_profile():
     if request.method == 'POST':
-        data = request.json
+        data = request.json or {}
+        
         current_user.first_name = data.get('first_name', current_user.first_name)
         current_user.last_name = data.get('last_name') or None
-
-        new_username = data.get('username')
-        if new_username:
-            if not new_username.startswith('@'):
-                new_username = '@' + new_username
-            current_user.username = new_username
+        current_user.phone = data.get('phone')
+        current_user.about_me = data.get('about_me')
+        if data.get('avatar'): current_user.avatar_url = data.get('avatar')
 
         b_day = data.get('birth_day')
         b_month = data.get('birth_month')
@@ -1437,17 +1512,26 @@ def my_profile():
         if b_day and b_month and b_year:
             current_user.birth_date = f"{b_day}.{b_month}.{b_year}"
 
-        current_user.phone = data.get('phone')
-        current_user.about_me = data.get('about_me')
-        if data.get('avatar'): current_user.avatar_url = data.get('avatar')
-
-        current_user.show_phone = data.get('show_phone', False)
-        current_user.show_about = data.get('show_about', True)
-        current_user.show_birth_date = data.get('show_birth_date', False)
+        sp = data.get('show_phone')
+        if sp is not None: current_user.show_phone = sp
+        
+        sa = data.get('show_about')
+        if sa is not None: current_user.show_about = sa
+        
+        sbd = data.get('show_birth_date')
+        if sbd is not None: current_user.show_birth_date = sbd
 
         new_pwd = data.get('new_password')
         if new_pwd and new_pwd.strip() != "":
             current_user.password = new_pwd.strip()
+
+        if current_user.username.lower() != 'admin':
+            new_username = data.get('username')
+            if new_username:
+                clean_un = new_username.lstrip('@').strip()
+                if clean_un and clean_un != current_user.username:
+                    if not User.query.filter_by(username=clean_un).first():
+                        current_user.username = clean_un
 
         db.session.commit()
         return jsonify({'status': 'ok'})
@@ -1487,9 +1571,8 @@ def my_profile():
 @login_required
 def get_user_profile(user_id):
     user = User.query.get_or_404(user_id)
-    last_seen_str = user.last_seen.strftime('%H:%M') if user.last_seen else ''
+    last_seen_str = format_last_seen_str(user.last_seen)
 
-    # Трекинг с кем общается
     custom_status = None
     if can_see_chatting() and user.id in active_chat_views:
         p_id = active_chat_views[user.id]
@@ -1555,7 +1638,7 @@ def get_chats():
             'last_message': lmsg_preview,
             'last_time': last_msg.timestamp.strftime('%H:%M') if last_msg else '',
             'is_online': partner.id in connected_users,
-            'last_seen': partner.last_seen.strftime('%H:%M') if partner.last_seen else ''
+            'last_seen': format_last_seen_str(partner.last_seen)
         })
     return jsonify(chats_data)
 
@@ -1617,7 +1700,7 @@ def get_messages(chat_id):
 
         partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == chat_id, ChatParticipant.user_id != current_user.id).first()
         if partner_cp:
-            socketio.emit('messages_read', {'chat_id': chat_id}, room=f"user_{partner_cp.user_id}")
+            socketio.emit('messages_read', {'chat_id': chat_id}, room=f"user_{partner_cp.user_id}", namespace='/')
 
     if can_see_deleted():
         messages = Message.query.filter_by(chat_id=chat_id).order_by(Message.timestamp.asc()).all()
@@ -1661,14 +1744,16 @@ def admin_panel():
         flash("Доступ запрещен")
         return redirect(url_for('index'))
     users = User.query.order_by(User.id.desc()).all()
-    return render_template_string(ADMIN_TEMPLATE, users=users, connected=connected_users, has_admin_priv=has_admin_priv(), can_ban_users=can_ban_users())
+    return render_template_string(ADMIN_TEMPLATE, users=users, connected=connected_users, 
+                                  has_admin_priv=has_admin_priv(), can_ban_users=can_ban_users(),
+                                  format_last_seen=format_last_seen_str)
 
 @app.route('/api/admin/permissions/<int:target_id>', methods=['POST'])
 @login_required
 def update_permissions(target_id):
     if not has_admin_priv(): return "Forbidden", 403
     target = User.query.get_or_404(target_id)
-    data = request.json
+    data = request.json or {}
     
     target.is_admin = data.get('is_admin', False)
     target.is_moderator = data.get('is_moderator', False)
@@ -1686,22 +1771,23 @@ def admin_ban_user_endpoint(target_id):
     target = User.query.get_or_404(target_id)
     if target.is_admin and not current_user.is_admin: return "Cannot ban admin", 403
 
-    data = request.json
+    data = request.json or {}
     action = data.get('action')
+    ban_type = data.get('type', action)
 
-    if action == 'unban':
+    if action == 'unban' or ban_type == 'unban':
         target.banned_until = None
-    elif action == 'forever':
+    elif ban_type == 'forever' or action == 'forever':
         target.banned_until = datetime(9999, 12, 31, 23, 59, 59)
-        socketio.emit('force_logout', {}, room=f"user_{target.id}")
-    elif action == 'temporary':
+        socketio.emit('force_logout', {}, room=f"user_{target.id}", namespace='/')
+    elif ban_type in ['temporary', 'temp'] or action == 'temporary':
         until_str = data.get('until')
         if until_str:
             try:
-                dt = datetime.strptime(until_str.replace("T", " ")[:16], "%Y-%m-%d %H:%M")
-                target.banned_until = dt
-                socketio.emit('force_logout', {}, room=f"user_{target.id}")
-            except Exception as e:
+                dt_str = until_str.replace("T", " ")[:16]
+                target.banned_until = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+                socketio.emit('force_logout', {}, room=f"user_{target.id}", namespace='/')
+            except Exception:
                 return "Invalid date format", 400
 
     db.session.commit()
@@ -1762,24 +1848,24 @@ def revert_impersonate():
 def broadcast_user_status(user_id):
     status = 'online' if user_id in connected_users else 'offline'
     u = User.query.get(user_id)
-    last_seen = u.last_seen.strftime('%H:%M') if u and u.last_seen else ''
+    last_seen = format_last_seen_str(u.last_seen) if u else ''
     
     chatting_with_name = None
     if user_id in active_chat_views:
         partner = User.query.get(active_chat_views[user_id])
         if partner: chatting_with_name = f"{partner.first_name} {partner.last_name or ''}"
 
-    emit('status_update', {
+    socketio.emit('status_update', {
         'user_id': user_id, 'status': status, 'last_seen': last_seen,
         'chatting_with_name': chatting_with_name
-    }, broadcast=True)
+    }, namespace='/')
 
 @socketio.on('connect')
 def handle_connect():
     if current_user.is_authenticated:
         banned, _, _ = check_user_banned(current_user)
         if banned:
-            return False # Жестко отсекаем коннект заблокированному
+            return False 
 
         join_room(f"user_{current_user.id}")
         connected_users[current_user.id] = request.sid
@@ -1907,10 +1993,10 @@ def init_db():
             
             db.session.execute(text("ALTER TABLE users ALTER COLUMN last_name DROP NOT NULL;"))
             db.session.commit()
-            print("База данных успешно синхронизирована (Sudo-колонки и Voice добавлены).")
+            print("База данных успешно синхронизирована.")
         except Exception as e:
             db.session.rollback()
-            print(f"Ошибка при обновлении структуры базы данных: {e}")
+            print(f"Ошибка при обновлении структуры: {e}")
 
         if not User.query.filter_by(username='admin').first():
             admin = User(
