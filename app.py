@@ -39,7 +39,7 @@ login_manager.login_view = 'login'
 socketio = SocketIO(app, async_mode='gevent', cors_allowed_origins="*")
 
 # ==========================================
-# ВСПОМОГАТЕЛЬНАЯ ЛОГИКА И ПРАВА (SUDO)
+# ВСПОМОГАТЕЛЬНАЯ ЛОГИКА И ПРАВА
 # ==========================================
 def now_msk():
     return datetime.utcnow() + timedelta(hours=3)
@@ -93,6 +93,16 @@ def check_user_banned(u):
     db.session.commit()
     return False, None, False
 
+def is_allowed_to_see(target_user, privacy_setting, viewer_id):
+    if viewer_id == target_user.id or has_admin_priv():
+        return True
+    if privacy_setting == 'nobody':
+        return False
+    if privacy_setting == 'contacts':
+        c = Contact.query.filter_by(user_id=target_user.id, contact_id=viewer_id, is_explicit=True).first()
+        return c is not None
+    return True
+
 # ==========================================
 # МОДЕЛИ БАЗЫ ДАННЫХ
 # ==========================================
@@ -111,10 +121,12 @@ class User(UserMixin, db.Model):
     birth_date = db.Column(db.String(20), nullable=True)
     last_seen = db.Column(db.DateTime, default=now_msk)
 
-    show_phone = db.Column(db.Boolean, default=False)
-    show_about = db.Column(db.Boolean, default=True)
-    show_birth_date = db.Column(db.Boolean, default=False)
+    # Настройки Конфиденциальности ('everyone', 'contacts', 'nobody')
+    privacy_phone = db.Column(db.String(20), default='everyone')
+    privacy_bday = db.Column(db.String(20), default='everyone')
+    privacy_last_seen = db.Column(db.String(20), default='everyone')
 
+    # SUDO Права
     is_admin = db.Column(db.Boolean, default=False)
     is_moderator = db.Column(db.Boolean, default=False)
     perm_edit_history = db.Column(db.Boolean, default=False)
@@ -123,7 +135,6 @@ class User(UserMixin, db.Model):
     perm_ban_users = db.Column(db.Boolean, default=False)
 
     banned_until = db.Column(db.DateTime, nullable=True)
-
     promoted_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     created_at = db.Column(db.DateTime, default=now_msk)
 
@@ -132,7 +143,16 @@ class Contact(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     contact_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    custom_name = db.Column(db.String(50), nullable=True)
+    is_explicit = db.Column(db.Boolean, default=False)
     added_at = db.Column(db.DateTime, default=now_msk)
+
+class PersonalBlock(db.Model):
+    __tablename__ = 'personal_blocks'
+    id = db.Column(db.Integer, primary_key=True)
+    blocker_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    blocked_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    timestamp = db.Column(db.DateTime, default=now_msk)
 
 class Chat(db.Model):
     __tablename__ = 'chats'
@@ -171,7 +191,7 @@ connected_users = {}
 active_chat_views = {} 
 
 # ==========================================
-# HTML ШАБЛОНЫ (Jinja2 + Tailwind + Alpine)
+# HTML ШАБЛОНЫ
 # ==========================================
 BASE_HTML_HEAD = """
 <!DOCTYPE html>
@@ -448,6 +468,22 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                 </div>
                             </div>
                         </div>
+
+                        <div class="relative flex items-center" x-data="{ menuOpen: false }">
+                            <button @click="menuOpen = !menuOpen" class="p-2 text-gray-400 hover:text-white transition rounded-full hover:bg-gray-800">
+                                <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M12 16a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2m0-6a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2m0-6a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2z"></path></svg>
+                            </button>
+
+                            <div x-show="menuOpen" @click.away="menuOpen = false" class="absolute right-0 top-full mt-2 w-48 bg-gray-800 rounded-2xl shadow-2xl border border-gray-700 py-2 z-50 text-sm font-medium">
+                                <button @click="menuOpen = false; openContactModal()" class="w-full text-left px-4 py-2 hover:bg-gray-700 text-white flex items-center gap-2">
+                                    <span x-text="currentChat.is_explicit_contact ? 'Изменить контакт' : 'Добавить контакт'"></span>
+                                </button>
+                                <button @click="menuOpen = false; togglePersonalBlock()" class="w-full text-left px-4 py-2 hover:bg-red-950/50 text-red-400 border-t border-gray-700/80 mt-1 flex items-center gap-2">
+                                    <span x-text="currentChat.i_blocked_partner ? 'Разблокировать' : 'Заблокировать'"></span>
+                                </button>
+                            </div>
+                        </div>
+
                     </div>
 
                     <div class="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 max-h-full" id="messagesBox">
@@ -543,7 +579,19 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                 </button>
                             </template>
 
-                            <template x-if="!currentChat.partner_is_banned && showMicInstructionBanner">
+                            <template x-if="!currentChat.partner_is_banned && currentChat.i_blocked_partner">
+                                <div class="flex-1 bg-red-950/40 text-red-400 font-bold text-sm md:text-base rounded-full px-4 py-2 md:py-3 flex items-center justify-center border border-red-900/50 select-none">
+                                    Вы заблокировали пользователя
+                                </div>
+                            </template>
+
+                            <template x-if="!currentChat.partner_is_banned && !currentChat.i_blocked_partner && currentChat.partner_blocked_me">
+                                <div class="flex-1 bg-red-950/40 text-red-400 font-bold text-sm md:text-base rounded-full px-4 py-2 md:py-3 flex items-center justify-center border border-red-900/50 select-none">
+                                    Вы заблокированы у пользователя
+                                </div>
+                            </template>
+
+                            <template x-if="!currentChat.partner_is_banned && !currentChat.i_blocked_partner && !currentChat.partner_blocked_me && showMicInstructionBanner">
                                 <div class="flex-1 bg-red-950/90 border border-red-700 text-red-100 rounded-2xl md:rounded-full px-4 py-2 md:py-3 flex flex-col md:flex-row items-center justify-center gap-1 text-center text-xs md:text-sm shadow-inner">
                                     <span>Включите доступ приложению к микрофону в настройках и перезапустите приложение</span>
                                     <a href="/micro" class="underline font-bold text-white hover:text-blue-300 whitespace-nowrap">(нажмите что бы получить инструкцию)</a>
@@ -552,31 +600,31 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                 </div>
                             </template>
 
-                            <template x-if="!currentChat.partner_is_banned && !isRecording && !showMicInstructionBanner">
+                            <template x-if="!currentChat.partner_is_banned && !currentChat.i_blocked_partner && !currentChat.partner_blocked_me && !isRecording && !showMicInstructionBanner">
                                 <label class="cursor-pointer p-2 text-gray-400 hover:text-blue-500 transition flex-shrink-0">
                                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
                                     <input type="file" class="hidden" accept="image/*" @change="handleImageSelect">
                                 </label>
                             </template>
 
-                            <template x-if="!currentChat.partner_is_banned && !isRecording && !showMicInstructionBanner">
+                            <template x-if="!currentChat.partner_is_banned && !currentChat.i_blocked_partner && !currentChat.partner_blocked_me && !isRecording && !showMicInstructionBanner">
                                 <input type="text" x-model="newMessage" @keydown.enter="sendMessage()" @input="sendTyping()" placeholder="Сообщение..." class="flex-1 min-w-0 bg-gray-800 text-sm md:text-base text-white rounded-full px-4 py-2 md:py-3 focus:outline-none focus:ring-1 focus:ring-blue-500 shadow-inner">
                             </template>
 
-                            <template x-if="!currentChat.partner_is_banned && isRecording && !showMicInstructionBanner">
+                            <template x-if="!currentChat.partner_is_banned && !currentChat.i_blocked_partner && !currentChat.partner_blocked_me && isRecording && !showMicInstructionBanner">
                                 <div class="flex-1 bg-red-950/60 border border-red-800 text-red-200 rounded-full px-4 py-2 md:py-3 flex items-center justify-center gap-2 font-mono font-bold animate-pulse">
                                     <div class="w-3 h-3 rounded-full bg-red-500"></div>
                                     <span x-text="formatTimer(recordTimer)"></span>
                                 </div>
                             </template>
 
-                            <template x-if="!currentChat.partner_is_banned && !isRecording && !showMicInstructionBanner">
+                            <template x-if="!currentChat.partner_is_banned && !currentChat.i_blocked_partner && !currentChat.partner_blocked_me && !isRecording && !showMicInstructionBanner">
                                 <button @click="sendMessage()" class="flex-shrink-0 bg-blue-600 hover:bg-blue-500 text-white rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center transition shadow-lg" :disabled="!newMessage.trim() && !imagePreview">
                                     <svg class="w-4 h-4 md:w-5 md:h-5 ml-1 transform -rotate-45" fill="currentColor" viewBox="0 0 20 20"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"></path></svg>
                                 </button>
                             </template>
 
-                            <template x-if="!currentChat.partner_is_banned">
+                            <template x-if="!currentChat.partner_is_banned && !currentChat.i_blocked_partner && !currentChat.partner_blocked_me">
                                 <button type="button" @click="toggleVoiceRecord()" :class="isRecording ? 'bg-red-600 text-white animate-pulse' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'" class="flex-shrink-0 rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center transition shadow-lg">
                                     <svg class="w-4 h-4 md:w-5 md:h-5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z" clip-rule="evenodd"></path></svg>
                                 </button>
@@ -586,6 +634,18 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     </div>
                 </div>
             </template>
+        </div>
+
+        <div x-show="showContactModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" @click.self="showContactModal = false">
+            <div class="bg-[#1e293b] p-6 rounded-2xl border border-gray-700 w-full max-w-sm shadow-2xl">
+                <h3 class="text-white font-bold text-lg mb-2">Никнейм контакта</h3>
+                <p class="text-xs text-gray-400 mb-4">Измените имя пользователя чисто для своего отображения</p>
+                <input type="text" x-model="contactCustomName" placeholder="Имя контакта..." class="w-full bg-gray-900 border border-gray-600 rounded-xl p-3 text-white text-sm focus:ring-1 focus:ring-blue-500 mb-4 outline-none">
+                <div class="flex gap-2">
+                    <button @click="saveContactCustomName()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 rounded-xl text-sm transition">Сохранить</button>
+                    <button @click="showContactModal = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-bold py-2.5 rounded-xl text-sm transition">Отмена</button>
+                </div>
+            </div>
         </div>
 
         <div x-show="contextMenu.show" 
@@ -654,10 +714,10 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
         </div>
 
         <div x-show="showProfileModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" @click.self="closeProfileModal()">
-             <div class="bg-[#242f3d] w-full max-w-sm rounded-lg shadow-2xl overflow-hidden flex flex-col relative text-gray-100">
+             <div class="bg-[#242f3d] w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden flex flex-col relative text-gray-100 max-h-[90vh]">
 
                 <div class="absolute top-4 right-4 flex gap-4 z-20">
-                    <button x-show="isMyProfile" @click="editMode = true" class="text-white hover:text-blue-400 drop-shadow-md">
+                    <button x-show="isMyProfile && !editMode && !privacyMode" @click="editMode = true" class="text-white hover:text-blue-400 drop-shadow-md">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
                     </button>
                     <button @click="closeProfileModal()" class="text-white hover:text-red-400 drop-shadow-md">
@@ -665,7 +725,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     </button>
                 </div>
 
-                <div x-show="!editMode" class="flex flex-col">
+                <div x-show="!editMode && !privacyMode" class="flex flex-col overflow-y-auto">
                     <div class="relative pb-6 bg-gradient-to-b from-[#1c242f] to-[#242f3d]">
                         <div class="w-24 h-24 md:w-32 md:h-32 mx-auto mt-8 rounded-full bg-blue-600 flex items-center justify-center text-4xl font-bold shadow-lg overflow-hidden border-2 border-transparent">
                             <img x-show="viewProfileData.avatar" :src="viewProfileData.avatar" class="w-full h-full object-cover">
@@ -673,7 +733,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         </div>
                         <div class="text-center mt-4 px-4">
                             <div class="text-lg md:text-xl font-bold flex items-center justify-center gap-2 flex-wrap">
-                                <span x-text="viewProfileData.first_name + ' ' + (viewProfileData.last_name || '')"></span>
+                                <span x-text="viewProfileData.display_name || (viewProfileData.first_name + ' ' + (viewProfileData.last_name || ''))"></span>
                                 <template x-if="viewProfileData.is_admin"><span class="admin-badge">Admin</span></template>
                                 <template x-if="viewProfileData.is_moderator"><span class="mod-badge">Moderator</span></template>
                             </div>
@@ -709,13 +769,32 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                              </div>
                         </template>
 
-                        <template x-if="!isMyProfile && !viewProfileData.phone && !viewProfileData.about_me && !viewProfileData.formatted_bday">
-                            <div class="text-center text-gray-500 text-xs md:text-sm mt-4 italic">Дополнительная информация скрыта или не указана</div>
+                        <template x-if="isMyProfile">
+                            <div class="pt-4 border-t border-gray-700/80 space-y-3">
+                                <button @click="privacyMode = true" class="w-full bg-blue-950/40 hover:bg-blue-900/50 border border-blue-800/50 text-blue-300 p-3 rounded-xl font-bold flex items-center justify-between transition shadow-sm">
+                                    <div class="flex items-center gap-2.5">
+                                        <span class="text-blue-400 text-lg">🔒</span>
+                                        <span class="text-sm">Настройки Конфиденциальности</span>
+                                    </div>
+                                    <svg class="w-4 h-4 text-blue-400 transform -rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                                </button>
+
+                                <div class="pt-2">
+                                    <div class="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                                        <span class="text-base">📁</span>
+                                        <span>Помощь</span>
+                                    </div>
+                                    <div class="bg-[#1c242f] rounded-xl p-3 border border-gray-800">
+                                        <a href="/micro" class="text-blue-400 hover:text-blue-300 hover:underline font-medium text-sm block">Включение микрофона</a>
+                                    </div>
+                                </div>
+                            </div>
                         </template>
+
                     </div>
                 </div>
 
-                <div x-show="editMode" class="p-6 overflow-y-auto max-h-[80vh]">
+                <div x-show="editMode" class="p-6 overflow-y-auto">
                     <h3 class="text-base md:text-lg font-bold mb-4 text-blue-400">Редактирование профиля</h3>
 
                     <div class="flex flex-col items-center mb-4">
@@ -761,30 +840,66 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         </div>
 
                         <div class="mt-4 pt-4 border-t border-gray-700">
-                            <h4 class="text-xs md:text-sm font-semibold mb-2 text-gray-300">Настройки приватности</h4>
-                            <label class="flex items-center gap-2 mb-1">
-                                <input type="checkbox" x-model="editProfileData.show_phone" class="rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
-                                <span class="text-xs md:text-sm text-gray-300">Показывать Телефон</span>
-                            </label>
-                            <label class="flex items-center gap-2 mb-1">
-                                <input type="checkbox" x-model="editProfileData.show_about" class="rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
-                                <span class="text-xs md:text-sm text-gray-300">Показывать "О себе"</span>
-                            </label>
-                            <label class="flex items-center gap-2">
-                                <input type="checkbox" x-model="editProfileData.show_birth_date" class="rounded bg-gray-700 border-gray-600 text-blue-500 focus:ring-blue-500">
-                                <span class="text-xs md:text-sm text-gray-300">Показывать День рождения</span>
-                            </label>
-                        </div>
-
-                        <div class="mt-4 pt-4 border-t border-gray-700">
                              <h4 class="text-xs md:text-sm font-semibold mb-2 text-gray-300">Смена пароля</h4>
                              <input type="password" x-model="editProfileData.new_password" placeholder="Новый пароль" class="w-full bg-[#1c242f] border-none rounded p-2 text-sm text-white focus:ring-1 focus:ring-blue-500">
                         </div>
 
                         <div class="flex gap-2 pt-4">
-                            <button @click="saveProfile()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-2 rounded text-sm font-bold transition">Сохранить</button>
-                            <button @click="editMode = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-2 rounded text-sm font-bold transition">Отмена</button>
+                            <button @click="saveProfile()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-2.5 rounded-xl text-sm font-bold transition">Сохранить</button>
+                            <button @click="editMode = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-2.5 rounded-xl text-sm font-bold transition">Отмена</button>
                         </div>
+                    </div>
+                </div>
+
+                <div x-show="privacyMode" class="p-6 overflow-y-auto">
+                    <h3 class="text-base md:text-lg font-bold mb-4 text-blue-400 flex items-center gap-2">
+                        <span>🔒</span>
+                        <span>Кто видит мою информацию</span>
+                    </h3>
+
+                    <div class="space-y-4">
+                         
+                         <div class="bg-[#1c242f] p-3 rounded-xl border border-gray-800">
+                             <div class="flex justify-between items-center mb-2">
+                                 <span class="text-sm font-semibold text-white">Телефон</span>
+                                 <span class="text-xs text-blue-400 font-bold" x-text="translatePrivacy(editProfileData.privacy_phone)"></span>
+                             </div>
+                             <div class="grid grid-cols-3 gap-1.5 bg-gray-900 p-1 rounded-lg">
+                                 <button @click="editProfileData.privacy_phone = 'nobody'" :class="editProfileData.privacy_phone === 'nobody' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Никто</button>
+                                 <button @click="editProfileData.privacy_phone = 'contacts'" :class="editProfileData.privacy_phone === 'contacts' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Контакты</button>
+                                 <button @click="editProfileData.privacy_phone = 'everyone'" :class="editProfileData.privacy_phone === 'everyone' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Все</button>
+                             </div>
+                         </div>
+
+                         <div class="bg-[#1c242f] p-3 rounded-xl border border-gray-800">
+                             <div class="flex justify-between items-center mb-2">
+                                 <span class="text-sm font-semibold text-white">День рождения</span>
+                                 <span class="text-xs text-blue-400 font-bold" x-text="translatePrivacy(editProfileData.privacy_bday)"></span>
+                             </div>
+                             <div class="grid grid-cols-3 gap-1.5 bg-gray-900 p-1 rounded-lg">
+                                 <button @click="editProfileData.privacy_bday = 'nobody'" :class="editProfileData.privacy_bday === 'nobody' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Никто</button>
+                                 <button @click="editProfileData.privacy_bday = 'contacts'" :class="editProfileData.privacy_bday === 'contacts' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Контакты</button>
+                                 <button @click="editProfileData.privacy_bday = 'everyone'" :class="editProfileData.privacy_bday === 'everyone' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Все</button>
+                             </div>
+                         </div>
+
+                         <div class="bg-[#1c242f] p-3 rounded-xl border border-gray-800">
+                             <div class="flex justify-between items-center mb-2">
+                                 <span class="text-sm font-semibold text-white">Время захода</span>
+                                 <span class="text-xs text-blue-400 font-bold" x-text="translatePrivacy(editProfileData.privacy_last_seen)"></span>
+                             </div>
+                             <div class="grid grid-cols-3 gap-1.5 bg-gray-900 p-1 rounded-lg">
+                                 <button @click="editProfileData.privacy_last_seen = 'nobody'" :class="editProfileData.privacy_last_seen === 'nobody' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Никто</button>
+                                 <button @click="editProfileData.privacy_last_seen = 'contacts'" :class="editProfileData.privacy_last_seen === 'contacts' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Контакты</button>
+                                 <button @click="editProfileData.privacy_last_seen = 'everyone'" :class="editProfileData.privacy_last_seen === 'everyone' ? 'bg-blue-600 text-white font-bold' : 'text-gray-400 hover:text-white'" class="py-1.5 rounded-md text-xs transition">Все</button>
+                             </div>
+                         </div>
+
+                    </div>
+
+                    <div class="flex gap-2 pt-6">
+                        <button @click="saveProfile()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white py-2.5 rounded-xl text-sm font-bold transition">Применить</button>
+                        <button @click="privacyMode = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-2.5 rounded-xl text-sm font-bold transition">Назад</button>
                     </div>
                 </div>
 
@@ -814,6 +929,9 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 recordTimer: 0,
                 recordInterval: null,
 
+                showContactModal: false,
+                contactCustomName: '',
+
                 contextMenu: { show: false, x: 0, y: 0, msg: null },
                 longPressTimer: null,
                 touchX: 0,
@@ -828,6 +946,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 showProfileModal: false,
                 isMyProfile: false,
                 editMode: false,
+                privacyMode: false,
                 myProfileData: {}, 
                 viewProfileData: {},
                 editProfileData: {}, 
@@ -868,6 +987,16 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     this.socket.on('typing_status', (data) => {
                         this.typing[data.chat_id] = data.is_typing;
                         setTimeout(() => { this.typing[data.chat_id] = false }, 3000);
+                    });
+                    this.socket.on('block_status_changed', (data) => {
+                        this.loadChats().then(() => {
+                            if (this.currentChat && this.currentChat.chat_id === data.chat_id) {
+                                const updatedChat = this.chats.find(c => c.chat_id === data.chat_id);
+                                if (updatedChat) {
+                                    this.currentChat = updatedChat;
+                                }
+                            }
+                        });
                     });
                     this.socket.on('status_update', (data) => {
                          let chat = this.chats.find(c => c.partner_id === data.user_id);
@@ -977,6 +1106,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 openMyProfile() {
                     this.isMyProfile = true;
                     this.editMode = false;
+                    this.privacyMode = false;
                     this.viewProfileData = { ...this.myProfileData };
                     this.editProfileData = { ...this.myProfileData, new_password: '' };
                     this.showProfileModal = true;
@@ -985,6 +1115,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     if(userId === this.myId) { return this.openMyProfile(); }
                     this.isMyProfile = false;
                     this.editMode = false;
+                    this.privacyMode = false;
                     const res = await fetch('/api/profile/' + userId);
                     this.viewProfileData = await res.json();
                     this.showProfileModal = true;
@@ -992,6 +1123,12 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 closeProfileModal() {
                     this.showProfileModal = false;
                     this.editMode = false;
+                    this.privacyMode = false;
+                },
+                translatePrivacy(val) {
+                    if(val === 'nobody') return 'Никто';
+                    if(val === 'contacts') return 'Контакты';
+                    return 'Все';
                 },
                 handleAvatarSelect(event) {
                     const file = event.target.files[0];
@@ -1010,7 +1147,29 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         await this.fetchMyProfile();
                         this.viewProfileData = { ...this.myProfileData };
                         this.editMode = false;
+                        this.privacyMode = false;
                     }
+                },
+
+                openContactModal() {
+                    this.contactCustomName = this.currentChat.contact_custom_name || '';
+                    this.showContactModal = true;
+                },
+                async saveContactCustomName() {
+                    if(!this.currentChat) return;
+                    await fetch('/api/contact/save/' + this.currentChat.partner_id, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ custom_name: this.contactCustomName })
+                    });
+                    this.showContactModal = false;
+                    await this.loadChats();
+                    const updated = this.chats.find(c => c.chat_id === this.currentChat.chat_id);
+                    if(updated) this.currentChat = updated;
+                },
+                async togglePersonalBlock() {
+                    if(!this.currentChat) return;
+                    await fetch('/api/block/toggle/' + this.currentChat.partner_id, { method: 'POST' });
                 },
 
                 async loadChats() {
@@ -1082,9 +1241,10 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 },
 
                 async toggleVoiceRecord() {
-                    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+                    const isMobileAgent = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+                    const isMobileLayout = window.innerWidth < 768; // Стиль отдельно чаты и развернутые чаты (ширина телефона)
                     
-                    if (isMobile && !localStorage.getItem('mic_mobile_instructed')) {
+                    if ((isMobileAgent || isMobileLayout) && !localStorage.getItem('mic_mobile_instructed')) {
                         this.showMicInstructionBanner = true;
                         localStorage.setItem('mic_mobile_instructed', 'true');
                         return;
@@ -1492,7 +1652,7 @@ def index():
     return render_template_string(APP_TEMPLATE)
 
 # ==========================================
-# API ДЛЯ ПРОФИЛЯ
+# API ДЛЯ ПРОФИЛЯ, КОНТАКТОВ И БЛОКОВ
 # ==========================================
 @app.route('/api/profile/me', methods=['GET', 'POST'])
 @login_required
@@ -1512,14 +1672,9 @@ def my_profile():
         if b_day and b_month and b_year:
             current_user.birth_date = f"{b_day}.{b_month}.{b_year}"
 
-        sp = data.get('show_phone')
-        if sp is not None: current_user.show_phone = sp
-        
-        sa = data.get('show_about')
-        if sa is not None: current_user.show_about = sa
-        
-        sbd = data.get('show_birth_date')
-        if sbd is not None: current_user.show_birth_date = sbd
+        if 'privacy_phone' in data: current_user.privacy_phone = data['privacy_phone']
+        if 'privacy_bday' in data: current_user.privacy_bday = data['privacy_bday']
+        if 'privacy_last_seen' in data: current_user.privacy_last_seen = data['privacy_last_seen']
 
         new_pwd = data.get('new_password')
         if new_pwd and new_pwd.strip() != "":
@@ -1554,9 +1709,9 @@ def my_profile():
         'birth_month': b_month,
         'birth_year': b_year,
         'formatted_bday': format_bday(current_user.birth_date),
-        'show_phone': current_user.show_phone,
-        'show_about': current_user.show_about,
-        'show_birth_date': current_user.show_birth_date,
+        'privacy_phone': current_user.privacy_phone,
+        'privacy_bday': current_user.privacy_bday,
+        'privacy_last_seen': current_user.privacy_last_seen,
         'is_admin': current_user.is_admin,
         'is_moderator': current_user.is_moderator,
         'has_admin_priv': has_admin_priv(),
@@ -1571,7 +1726,9 @@ def my_profile():
 @login_required
 def get_user_profile(user_id):
     user = User.query.get_or_404(user_id)
-    last_seen_str = format_last_seen_str(user.last_seen)
+    
+    show_ls = is_allowed_to_see(user, user.privacy_last_seen, current_user.id)
+    last_seen_str = format_last_seen_str(user.last_seen) if show_ls else "недавно"
 
     custom_status = None
     if can_see_chatting() and user.id in active_chat_views:
@@ -1579,10 +1736,17 @@ def get_user_profile(user_id):
         p = User.query.get(p_id)
         if p: custom_status = f"общается с: {p.first_name} {p.last_name or ''}"
 
+    contact = Contact.query.filter_by(user_id=current_user.id, contact_id=user.id, is_explicit=True).first()
+    disp_name = contact.custom_name if (contact and contact.custom_name) else f"{user.first_name} {user.last_name or ''}"
+
+    show_phone = is_allowed_to_see(user, user.privacy_phone, current_user.id)
+    show_bday = is_allowed_to_see(user, user.privacy_bday, current_user.id)
+
     data = {
         'id': user.id,
         'first_name': user.first_name,
         'last_name': user.last_name,
+        'display_name': disp_name,
         'username': user.username,
         'avatar': user.avatar_url,
         'is_admin': user.is_admin,
@@ -1590,11 +1754,49 @@ def get_user_profile(user_id):
         'is_online': user.id in connected_users,
         'last_seen': last_seen_str,
         'custom_status': custom_status,
-        'phone': user.phone if user.show_phone else None,
-        'about_me': user.about_me if user.show_about else None,
-        'formatted_bday': format_bday(user.birth_date) if user.show_birth_date else None
+        'phone': user.phone if show_phone else None,
+        'about_me': user.about_me,
+        'formatted_bday': format_bday(user.birth_date) if show_bday else None
     }
     return jsonify(data)
+
+@app.route('/api/contact/save/<int:partner_id>', methods=['POST'])
+@login_required
+def save_contact_endpoint(partner_id):
+    data = request.json or {}
+    custom_name = data.get('custom_name', '').strip()
+    
+    contact = Contact.query.filter_by(user_id=current_user.id, contact_id=partner_id).first()
+    if not contact:
+        contact = Contact(user_id=current_user.id, contact_id=partner_id)
+        db.session.add(contact)
+        
+    contact.custom_name = custom_name if custom_name else None
+    contact.is_explicit = True
+    db.session.commit()
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/block/toggle/<int:partner_id>', methods=['POST'])
+@login_required
+def toggle_personal_block_endpoint(partner_id):
+    block = PersonalBlock.query.filter_by(blocker_id=current_user.id, blocked_id=partner_id).first()
+    if block:
+        db.session.delete(block)
+        status = 'unblocked'
+    else:
+        new_block = PersonalBlock(blocker_id=current_user.id, blocked_id=partner_id)
+        db.session.add(new_block)
+        status = 'blocked'
+    db.session.commit()
+    
+    my_chats = set(cp.chat_id for cp in ChatParticipant.query.filter_by(user_id=current_user.id).all())
+    target_chats = set(cp.chat_id for cp in ChatParticipant.query.filter_by(user_id=partner_id).all())
+    common = my_chats.intersection(target_chats)
+    cid = list(common)[0] if common else 0
+
+    socketio.emit('block_status_changed', {'chat_id': cid}, room=f"user_{current_user.id}", namespace='/')
+    socketio.emit('block_status_changed', {'chat_id': cid}, room=f"user_{partner_id}", namespace='/')
+    return jsonify({'status': status})
 
 # ==========================================
 # API ДЛЯ ЧАТОВ И ПОИСКА
@@ -1620,6 +1822,15 @@ def get_chats():
 
         partner_banned, _, _ = check_user_banned(partner)
 
+        contact = Contact.query.filter_by(user_id=current_user.id, contact_id=partner.id, is_explicit=True).first()
+        disp_name = contact.custom_name if (contact and contact.custom_name) else f"{partner.first_name} {partner.last_name or ''}"
+
+        i_blocked = PersonalBlock.query.filter_by(blocker_id=current_user.id, blocked_id=partner.id).first() is not None
+        partner_blocked = PersonalBlock.query.filter_by(blocker_id=partner.id, blocked_id=current_user.id).first() is not None
+
+        show_ls = is_allowed_to_see(partner, partner.privacy_last_seen, current_user.id)
+        ls_str = format_last_seen_str(partner.last_seen) if show_ls else "недавно"
+
         lmsg_preview = ''
         if last_msg:
             if last_msg.voice_base64: lmsg_preview = '[Голосовое]'
@@ -1629,16 +1840,19 @@ def get_chats():
         chats_data.append({
             'chat_id': cid,
             'partner_id': partner.id,
-            'partner_name': f"{partner.first_name} {partner.last_name or ''}",
-            'partner_avatar': partner.avatar_url,
+            'partner_name': disp_name,
+            'contact_custom_name': contact.custom_name if contact else '',
+            'is_explicit_contact': contact is not None,
             'partner_is_admin': partner.is_admin,
             'partner_is_moderator': partner.is_moderator,
             'partner_is_banned': partner_banned,
+            'i_blocked_partner': i_blocked,
+            'partner_blocked_me': partner_blocked,
             'custom_status': custom_status,
             'last_message': lmsg_preview,
             'last_time': last_msg.timestamp.strftime('%H:%M') if last_msg else '',
             'is_online': partner.id in connected_users,
-            'last_seen': format_last_seen_str(partner.last_seen)
+            'last_seen': ls_str
         })
     return jsonify(chats_data)
 
@@ -1684,8 +1898,8 @@ def start_chat(target_id):
         db.session.add_all([
             ChatParticipant(chat_id=chat_id, user_id=current_user.id),
             ChatParticipant(chat_id=chat_id, user_id=target_id),
-            Contact(user_id=current_user.id, contact_id=target_id),
-            Contact(user_id=target_id, contact_id=current_user.id)
+            Contact(user_id=current_user.id, contact_id=target_id, is_explicit=False),
+            Contact(user_id=target_id, contact_id=current_user.id, is_explicit=False)
         ])
         db.session.commit()
     return jsonify({'chat_id': chat_id})
@@ -1848,7 +2062,8 @@ def revert_impersonate():
 def broadcast_user_status(user_id):
     status = 'online' if user_id in connected_users else 'offline'
     u = User.query.get(user_id)
-    last_seen = format_last_seen_str(u.last_seen) if u else ''
+    show_ls = is_allowed_to_see(u, u.privacy_last_seen if u else 'everyone', 0)
+    last_seen = format_last_seen_str(u.last_seen) if (u and show_ls) else 'недавно'
     
     chatting_with_name = None
     if user_id in active_chat_views:
@@ -1907,6 +2122,14 @@ def handle_message(data):
     chat_id = data.get('chat_id')
     reply_to_id = data.get('reply_to_id')
     forwarded_from_id = data.get('forwarded_from_id')
+
+    # Проверка на личный блок перед отправкой
+    partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == chat_id, ChatParticipant.user_id != current_user.id).first()
+    if partner_cp:
+        block1 = PersonalBlock.query.filter_by(blocker_id=current_user.id, blocked_id=partner_cp.user_id).first()
+        block2 = PersonalBlock.query.filter_by(blocker_id=partner_cp.user_id, blocked_id=current_user.id).first()
+        if block1 or block2:
+            return # Физически блокируем отправку пакета на уровне сокета
 
     msg = Message(
         chat_id=chat_id, sender_id=current_user.id, 
@@ -1991,9 +2214,16 @@ def init_db():
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS perm_ban_users BOOLEAN DEFAULT FALSE;"))
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_until TIMESTAMP;"))
             
+            # Новые колонки для Контактов и Настроек Конфиденциальности
+            db.session.execute(text("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS custom_name VARCHAR(50);"))
+            db.session.execute(text("ALTER TABLE contacts ADD COLUMN IF NOT EXISTS is_explicit BOOLEAN DEFAULT FALSE;"))
+            db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_phone VARCHAR(20) DEFAULT 'everyone';"))
+            db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_bday VARCHAR(20) DEFAULT 'everyone';"))
+            db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_last_seen VARCHAR(20) DEFAULT 'everyone';"))
+
             db.session.execute(text("ALTER TABLE users ALTER COLUMN last_name DROP NOT NULL;"))
             db.session.commit()
-            print("База данных успешно синхронизирована.")
+            print("База данных успешно синхронизирована (Контакты и Конфиденциальность добавлены).")
         except Exception as e:
             db.session.rollback()
             print(f"Ошибка при обновлении структуры: {e}")
