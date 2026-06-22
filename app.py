@@ -645,7 +645,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
                         <div x-show="showEmojiPicker" style="display:none;" class="absolute bottom-full left-2 mb-2 bg-gray-800 border border-gray-700 p-3 rounded-2xl grid grid-cols-6 gap-2 md:gap-3 text-2xl shadow-2xl z-50">
                             <template x-for="emo in emojiList" :key="emo">
-                                <span class="cursor-pointer hover:scale-125 transition transform" @mousedown.prevent @touchstart.prevent @click="newMessage += emo; if($refs.msgInput) $refs.msgInput.focus(); showEmojiPicker=false" x-text="emo"></span>
+                                <span class="cursor-pointer hover:scale-125 transition transform" @click="newMessage += emo; if($refs.msgInput) $refs.msgInput.focus(); showEmojiPicker=false" x-text="emo"></span>
                             </template>
                         </div>
 
@@ -681,7 +681,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                     </template>
 
                                     <template x-if="!currentChat.is_group || currentChat.perms.send_emoji || currentChat.i_am_admin || currentChat.i_am_owner">
-                                        <button @mousedown.prevent @touchstart.prevent @click="showEmojiPicker = !showEmojiPicker" class="p-2 text-gray-400 hover:text-yellow-400 transition flex-shrink-0 text-xl">😀</button>
+                                        <button type="button" @click="showEmojiPicker = !showEmojiPicker" class="p-2 text-gray-400 hover:text-yellow-400 transition flex-shrink-0 text-xl">😀</button>
                                     </template>
                                 </div>
                             </template>
@@ -698,7 +698,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             </template>
 
                             <template x-if="canInputMessages() && !isRecording">
-                                 <button @mousedown.prevent @touchstart.prevent @click="sendMessage()" class="flex-shrink-0 bg-blue-600 hover:bg-blue-500 text-white rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center transition shadow-lg" :disabled="!newMessage.trim() && !imagePreview">
+                                 <button type="button" @click="sendMessage()" class="flex-shrink-0 bg-blue-600 hover:bg-blue-500 text-white rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center transition shadow-lg" :disabled="!newMessage.trim() && !imagePreview">
                                     <svg class="w-4 h-4 md:w-5 md:h-5 ml-1 transform -rotate-45" fill="currentColor" viewBox="0 0 20 20"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"></path></svg>
                                 </button>
                             </template>
