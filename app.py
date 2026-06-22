@@ -3,7 +3,6 @@ from gevent import monkey
 monkey.patch_all()
 
 import os
-import json
 from datetime import datetime, timedelta
 from flask import Flask, request, redirect, url_for, flash, session, jsonify, render_template_string, send_from_directory, abort
 from flask_sqlalchemy import SQLAlchemy
@@ -117,6 +116,7 @@ class User(UserMixin, db.Model):
     password = db.Column(db.String(100), nullable=False)
     first_name = db.Column(db.String(50), nullable=False)
     last_name = db.Column(db.String(50), nullable=True) 
+    class_name = db.Column(db.String(20), nullable=True) 
 
     avatar_url = db.Column(db.Text, nullable=True)
     phone = db.Column(db.String(20), nullable=True)
@@ -128,6 +128,7 @@ class User(UserMixin, db.Model):
     privacy_bday = db.Column(db.String(20), default='everyone')
     privacy_last_seen = db.Column(db.String(20), default='everyone')
 
+    # SUDO Права
     is_admin = db.Column(db.Boolean, default=False)
     is_moderator = db.Column(db.Boolean, default=False)
     perm_edit_history = db.Column(db.Boolean, default=False)
@@ -165,31 +166,12 @@ class Chat(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     type = db.Column(db.String(20), default='private')
     created_at = db.Column(db.DateTime, default=now_msk)
-    # Для групп
-    name = db.Column(db.String(100), nullable=True)
-    avatar_url = db.Column(db.Text, nullable=True)
-    description = db.Column(db.Text, nullable=True)
-    owner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
-    global_send_text = db.Column(db.Boolean, default=True)
-    global_send_photos = db.Column(db.Boolean, default=True)
-    global_send_voice = db.Column(db.Boolean, default=True)
-    global_send_emoji = db.Column(db.Boolean, default=True)
-    global_add_members = db.Column(db.Boolean, default=True)
-    global_change_profile = db.Column(db.Boolean, default=False)
 
 class ChatParticipant(db.Model):
     __tablename__ = 'chat_participants'
     id = db.Column(db.Integer, primary_key=True)
     chat_id = db.Column(db.Integer, db.ForeignKey('chats.id'), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    # Роли и права в группе
-    is_admin = db.Column(db.Boolean, default=False)
-    role_tag = db.Column(db.String(50), nullable=True)
-    perm_change_profile = db.Column(db.Boolean, default=False)
-    perm_delete_msgs = db.Column(db.Boolean, default=False)
-    perm_ban_users = db.Column(db.Boolean, default=False)
-    perm_change_tags = db.Column(db.Boolean, default=False)
-    perm_assign_admins = db.Column(db.Boolean, default=False)
 
 class Message(db.Model):
     __tablename__ = 'messages'
@@ -220,10 +202,11 @@ class UserGift(db.Model):
     owner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     gift_def_id = db.Column(db.Integer, db.ForeignKey('gift_definitions.id'), nullable=False)
     is_pinned = db.Column(db.Boolean, default=False)
-    slot_index = db.Column(db.Integer, nullable=True) 
+    slot_index = db.Column(db.Integer, nullable=True) # 0..3
     is_for_sale = db.Column(db.Boolean, default=False)
     sale_price = db.Column(db.Integer, nullable=True)
     acquired_at = db.Column(db.DateTime, default=now_msk)
+
     gift_def = db.relationship('GiftDefinition', backref='instances')
     owner = db.relationship('User', backref='gifts')
 
@@ -261,6 +244,7 @@ def hook_track_message(sender_id, reply_to_msg_id=None, has_photo=False):
         q_sender.messages_sent += 1
         if has_photo: q_sender.photos_sent += 1
         db.session.commit()
+
         if reply_to_msg_id:
             rm = Message.query.get(reply_to_msg_id)
             if rm and rm.sender_id != sender_id:
@@ -268,7 +252,7 @@ def hook_track_message(sender_id, reply_to_msg_id=None, has_photo=False):
                 q_rec.replies_received += 1
                 db.session.commit()
     except Exception as e:
-        pass
+        print(f"Quest hook error: {e}")
 
 # ==========================================
 # HTML ШАБЛОНЫ
@@ -300,8 +284,6 @@ BASE_HTML_HEAD = """
             background-color: #1a3f20; border: 1px solid #28a745; color: #4ade80;
             padding: 0.1rem 0.4rem; border-radius: 0.375rem; font-size: 0.7rem; font-weight: 600; display: inline-block; line-height: 1;
         }
-        .group-tag-admin { background-color: #0c4a6e; border: 1px solid #0284c7; color: #7dd3fc; padding: 0.1rem 0.3rem; border-radius: 0.25rem; font-size: 0.65rem; font-weight: bold; }
-        .group-tag-user { background-color: #374151; border: 1px solid #4b5563; color: #d1d5db; padding: 0.1rem 0.3rem; border-radius: 0.25rem; font-size: 0.65rem; font-weight: bold; }
     </style>
 </head>
 <body class="bg-gray-900 text-gray-100 h-[100dvh] max-h-[100dvh] w-screen overflow-hidden flex flex-col font-sans fixed inset-0 select-none">
@@ -313,16 +295,93 @@ BASE_HTML_HEAD = """
     {% endif %}
 """
 
-BANNED_TEMPLATE = BASE_HTML_HEAD + """...""" # Остается без изменений (уже отправлял)
+BANNED_TEMPLATE = BASE_HTML_HEAD + """
+    <div class="flex-1 flex items-center justify-center bg-gray-900 px-4">
+        <div class="bg-gray-800 border border-red-950 p-8 rounded-2xl shadow-2xl max-w-md w-full flex flex-col items-center text-center">
+            <div class="w-20 h-20 rounded-full border-4 border-red-600 bg-black flex items-center justify-center shadow-lg mb-6">
+                <span class="text-white font-black text-4xl leading-none">!</span>
+            </div>
+            <h2 class="text-2xl font-bold text-red-500 mb-4">Вход ограничен</h2>
+            <p class="text-gray-200 text-base md:text-lg mb-6 font-medium leading-relaxed">
+                {% if is_permanent %}Вы были заблокированы навсегда
+                {% else %}Вы были заблокированы до<br>
+                <span class="font-mono font-bold text-red-400 text-lg block mt-2">{{ ban_date_str }}</span>{% endif %}
+            </p>
+            <div class="w-full border-t border-gray-700/80 pt-4 mt-2">
+                <span class="text-xs text-gray-400 tracking-wider">Администрация You`Me</span>
+            </div>
+            <div class="mt-6">
+                <a href="{{ url_for('logout') }}" class="text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-4 py-2 rounded-full transition">Выйти из аккаунта</a>
+            </div>
+        </div>
+    </div>
+</body></html>
+"""
 
-MICRO_TEMPLATE = BASE_HTML_HEAD + """...""" # Остается без изменений
+MICRO_TEMPLATE = BASE_HTML_HEAD + """
+    <div class="flex-1 flex flex-col bg-gray-900 text-gray-100 p-4 md:p-6 max-w-4xl mx-auto w-full h-full select-none" x-data="{ step: 1, total: 5 }">
+        <div class="flex items-center justify-between pb-4 mb-4 border-b border-gray-800 flex-shrink-0">
+            <a href="{{ url_for('index') }}" class="flex items-center gap-2 text-blue-400 hover:text-blue-300 transition font-medium text-sm md:text-base">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                <span>Назад на главную</span>
+            </a>
+            <h1 class="text-base md:text-xl font-bold text-white">Инструкция по включению микрофона</h1>
+            <div class="w-20 hidden md:block"></div>
+        </div>
+        <div class="flex-1 flex flex-col items-center justify-center min-h-0 relative bg-black/40 rounded-xl border border-gray-800 p-2 md:p-4 overflow-hidden">
+            <img :src="'/screen' + step" alt="Шаг инструкции" class="max-w-full max-h-full object-contain rounded-lg shadow-2xl transition-all duration-300" onerror="this.src='https://placehold.co/600x400/1e293b/ffffff?text=Скриншот+' + step + '+отсутствует'">
+        </div>
+        <div class="flex items-center justify-between pt-4 mt-4 border-t border-gray-800 flex-shrink-0 gap-2 md:gap-4">
+            <button @click="if(step > 1) step--" :disabled="step === 1" :class="step === 1 ? 'opacity-30 cursor-not-allowed bg-gray-800 text-gray-500' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg'" class="flex items-center gap-1 md:gap-2 px-4 md:px-6 py-2.5 rounded-full font-bold text-xs md:text-sm transition">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg><span>Назад</span>
+            </button>
+            <div class="font-mono text-xs md:text-base font-bold text-gray-400 bg-gray-800/80 px-4 py-1.5 rounded-full border border-gray-700">
+                Шаг <span class="text-white" x-text="step"></span> из <span x-text="total"></span>
+            </div>
+            <button @click="if(step < total) step++" :disabled="step === total" :class="step === total ? 'opacity-30 cursor-not-allowed bg-gray-800 text-gray-500' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg'" class="flex items-center gap-1 md:gap-2 px-4 md:px-6 py-2.5 rounded-full font-bold text-xs md:text-sm transition">
+                <span>Вперед</span><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+            </button>
+        </div>
+    </div>
+</body></html>
+"""
 
-LOGIN_TEMPLATE = BASE_HTML_HEAD + """...""" # Остается без изменений
+LOGIN_TEMPLATE = BASE_HTML_HEAD + """
+    <div class="flex-1 flex items-center justify-center bg-gray-900 px-4" x-data="{ isLogin: true }">
+        <div class="bg-gray-800 p-6 md:p-8 rounded-xl shadow-2xl w-full max-w-md border border-gray-700">
+            <h1 class="text-3xl font-bold text-center text-blue-500 mb-6 font-serif tracking-widest">You`me</h1>
+            {% with messages = get_flashed_messages() %}{% if messages %}
+                <div class="bg-red-500/20 border border-red-500 text-red-200 p-3 rounded mb-4 text-center text-sm">
+                  {% for message in messages %}{{ message }}<br>{% endfor %}
+                </div>
+            {% endif %}{% endwith %}
+            <form x-show="isLogin" action="{{ url_for('login') }}" method="POST" class="space-y-4">
+                <input type="hidden" name="action" value="login">
+                <div><input type="text" name="username" placeholder="Логин (@username)" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500"></div>
+                <div><input type="password" name="password" placeholder="Пароль" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500"></div>
+                <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 md:py-2 rounded transition">Войти</button>
+                <p class="text-center text-sm text-gray-400 mt-4">Нет аккаунта? <a href="#" @click.prevent="isLogin = false" class="text-blue-400 hover:underline">Регистрация</a></p>
+            </form>
+            <form x-show="!isLogin" action="{{ url_for('login') }}" method="POST" class="space-y-4" style="display: none;">
+                <input type="hidden" name="action" value="register">
+                <div><input type="text" name="username" placeholder="Придумайте логин (только латиница)" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500"></div>
+                <div><input type="password" name="password" placeholder="Пароль" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500"></div>
+                <div class="flex flex-col gap-4 md:gap-2">
+                    <input type="text" name="first_name" placeholder="Имя" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
+                    <input type="text" name="last_name" placeholder="Фамилия (необязательно)" class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
+                </div>
+                <button type="submit" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 md:py-2 rounded transition">Зарегистрироваться</button>
+                <p class="text-center text-sm text-gray-400 mt-4">Уже есть аккаунт? <a href="#" @click.prevent="isLogin = true" class="text-blue-400 hover:underline">Войти</a></p>
+            </form>
+        </div>
+    </div>
+</body></html>
+"""
 
 APP_TEMPLATE = BASE_HTML_HEAD + """
     <div class="flex-1 flex overflow-hidden w-full h-full max-h-full" x-data="messengerApp()">
 
-        <div class="bg-gray-900 border-r border-gray-800 flex-col flex-shrink-0 w-full md:w-80 h-full max-h-full relative" :class="currentChat ? 'hidden md:flex' : 'flex'">
+        <div class="bg-gray-900 border-r border-gray-800 flex-col flex-shrink-0 w-full md:w-80 h-full max-h-full" :class="currentChat ? 'hidden md:flex' : 'flex'">
              
             <div class="p-4 border-b border-gray-800 flex justify-between items-center flex-shrink-0 relative">
                 <div class="flex items-center gap-3">
@@ -333,11 +392,13 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     <img src="/logo.png" alt="You'Me" class="h-10 md:h-12 object-contain" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
                     <div class="text-xl font-bold text-blue-500 tracking-wider" style="display:none;">You`me</div>
                 </div>
+
                 <div class="flex items-center gap-2">
                     <div @click="openQuestsModal()" class="flex items-center gap-1.5 bg-blue-500/15 hover:bg-blue-500/25 border border-blue-500/40 px-3 py-1 rounded-full cursor-pointer transition shadow-sm" title="Ежедневные задания">
-                        <img src="/molniya.png" class="w-5 h-5 md:w-6 md:h-6 object-contain" alt="⚡">
+                        <img src="/molniya.png" class="w-4 h-4 md:w-5 md:h-5 object-contain" alt="⚡">
                         <span class="text-white font-mono font-bold text-xs md:text-sm" x-text="myLightnings"></span>
                     </div>
+
                     {% if current_user.is_admin or current_user.is_moderator or current_user.perm_ban_users or current_user.perm_grant_gifts or current_user.perm_grant_lightnings or session.get('original_admin_id') %}
                     <a href="{{ url_for('admin_panel') }}" class="p-1 text-gray-400 hover:text-white" title="Панель Управления">
                         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.427.738-3.2 2.23-2.47z"></path></svg>
@@ -356,7 +417,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             <div class="flex-1 overflow-y-auto max-h-full">
                 <template x-if="searchQuery.length > 0">
                     <div>
-                        <div class="px-4 py-2 text-xs font-semibold text-gray-500 uppercase">Пользователи</div>
+                        <div class="px-4 py-2 text-xs font-semibold text-gray-500 uppercase">Результаты</div>
                         <template x-for="user in searchResults" :key="user.id">
                             <div @click="startChat(user.id)" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 cursor-pointer transition">
                                 <div class="w-10 h-10 rounded-full bg-gradient-to-tr from-blue-500 to-purple-600 flex items-center justify-center text-white font-bold overflow-hidden flex-shrink-0">
@@ -367,6 +428,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                     <div class="flex items-center gap-2">
                                         <div class="text-sm font-semibold truncate" x-text="user.first_name + ' ' + (user.last_name || '')"></div>
                                         <template x-if="user.is_admin"><span class="admin-badge">Admin</span></template>
+                                        <template x-if="user.is_moderator"><span class="mod-badge">Moderator</span></template>
                                     </div>
                                     <div class="text-xs text-gray-400 truncate" x-text="'@' + user.username"></div>
                                 </div>
@@ -381,18 +443,19 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         <template x-for="chat in chats" :key="chat.chat_id">
                             <div @click="openChat(chat)" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-800 cursor-pointer transition" :class="currentChat && currentChat.chat_id === chat.chat_id ? 'bg-gray-800' : ''">
                                 <div class="relative w-12 h-12 flex-shrink-0">
-                                    <div class="w-full h-full rounded-full bg-gray-700 flex items-center justify-center text-white font-bold text-lg shadow-inner overflow-hidden" :class="chat.is_group ? 'bg-gradient-to-tr from-green-500 to-blue-500' : ''">
+                                    <div class="w-full h-full rounded-full bg-gray-700 flex items-center justify-center text-white font-bold text-lg shadow-inner overflow-hidden">
                                         <img x-show="chat.partner_avatar" :src="chat.partner_avatar" class="w-full h-full object-cover">
-                                        <span x-show="!chat.partner_avatar && chat.is_group">👥</span>
-                                        <span x-show="!chat.partner_avatar && !chat.is_group" x-text="chat.partner_name[0]"></span>
+                                        <span x-show="!chat.partner_avatar" x-text="chat.partner_name[0]"></span>
                                     </div>
-                                    <div x-show="!chat.is_group && chat.is_online && !chat.partner_is_banned" class="absolute bottom-0 right-0 w-3.5 h-3.5 bg-blue-500 border-2 border-gray-900 rounded-full z-10"></div>
+                                    <div x-show="chat.is_online && !chat.partner_is_banned" class="absolute bottom-0 right-0 w-3.5 h-3.5 bg-blue-500 border-2 border-gray-900 rounded-full z-10"></div>
                                 </div>
 
                                 <div class="flex-1 min-w-0">
                                     <div class="flex justify-between items-center mb-1">
                                         <div class="text-sm font-semibold truncate flex items-center gap-2 pr-2">
                                             <span class="truncate" :class="chat.partner_is_banned ? 'line-through text-red-500' : ''" x-text="chat.partner_name"></span>
+                                            <template x-if="chat.partner_is_admin"><span class="admin-badge flex-shrink-0">Admin</span></template>
+                                            <template x-if="chat.partner_is_moderator"><span class="mod-badge flex-shrink-0">Moderator</span></template>
                                         </div>
                                         <div class="text-[10px] text-gray-500 whitespace-nowrap flex-shrink-0" x-text="chat.last_time"></div>
                                     </div>
@@ -403,10 +466,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     </div>
                 </template>
             </div>
-
-            <button @click="showGroupCreateModal = true" class="absolute bottom-6 right-6 w-14 h-14 bg-blue-600 hover:bg-blue-500 text-white rounded-full flex items-center justify-center shadow-2xl transition-transform hover:scale-105 z-20">
-                <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
-            </button>
         </div>
 
         <div class="flex-1 flex-col relative bg-[#0f172a] bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] h-full w-full max-h-full overflow-hidden" style="background-blend-mode: overlay;" :class="currentChat ? 'flex' : 'hidden md:flex'">
@@ -421,72 +480,60 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 <div class="flex-1 flex flex-col h-full w-full max-h-full overflow-hidden">
                     
                     <div class="h-16 px-3 md:px-6 bg-gray-900/95 backdrop-blur-md border-b border-gray-800 flex items-center justify-between shadow-sm z-10 flex-shrink-0">
-                        <div class="flex items-center gap-2 md:gap-4 min-w-0 cursor-pointer" @click="currentChat.is_group ? openGroupProfile(currentChat.chat_id) : openUserProfile(currentChat.partner_id)">
-                            <button @click.stop="closeChat()" class="md:hidden p-2 -ml-2 text-gray-400 hover:text-white transition flex-shrink-0">
+                        <div class="flex items-center gap-2 md:gap-4 min-w-0">
+                            <button @click="closeChat()" class="md:hidden p-2 -ml-2 text-gray-400 hover:text-white transition flex-shrink-0">
                                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
                             </button>
                             
-                            <div class="w-10 h-10 rounded-full overflow-hidden flex items-center justify-center text-white flex-shrink-0" :class="currentChat.is_group ? 'bg-gradient-to-tr from-green-500 to-blue-500' : 'bg-gray-700'">
-                                 <img x-show="currentChat.partner_avatar" :src="currentChat.partner_avatar" class="w-full h-full object-cover">
-                                 <span x-show="!currentChat.partner_avatar && currentChat.is_group">👥</span>
-                                 <span x-show="!currentChat.partner_avatar && !currentChat.is_group" x-text="currentChat.partner_name[0]"></span>
-                            </div>
-                            <div class="flex flex-col min-w-0">
-                                <div class="flex items-center gap-2 min-w-0">
-                                    <div class="text-white font-semibold text-sm md:text-base truncate flex items-center">
-                                        <span x-text="currentChat.partner_name"></span>
-                                        <template x-if="currentChat.partner_is_banned">
-                                            <span class="text-red-700 font-bold ml-1 flex-shrink-0"> — Заблокирован</span>
-                                        </template>
-                                    </div>
+                            <div class="flex items-center gap-3 cursor-pointer min-w-0" @click="openUserProfile(currentChat.partner_id)">
+                                <div class="w-10 h-10 rounded-full overflow-hidden bg-gray-700 flex items-center justify-center text-white flex-shrink-0">
+                                     <img x-show="currentChat.partner_avatar" :src="currentChat.partner_avatar" class="w-full h-full object-cover">
+                                     <span x-show="!currentChat.partner_avatar" x-text="currentChat.partner_name[0]"></span>
                                 </div>
-                                <div class="text-[11px] md:text-xs flex items-center gap-1 truncate text-gray-400">
-                                    <template x-if="currentChat.is_group">
-                                        <span x-text="currentChat.member_count + ' участников'"></span>
-                                    </template>
-                                    <template x-if="!currentChat.is_group">
+                                <div class="flex flex-col min-w-0">
+                                    <div class="flex items-center gap-2 min-w-0">
+                                        <div class="text-white font-semibold text-sm md:text-base truncate flex items-center">
+                                            <span x-text="currentChat.partner_name"></span>
+                                            <template x-if="currentChat.partner_is_banned">
+                                                <span class="text-red-700 font-bold ml-1 flex-shrink-0"> — Пользователь Заблокирован</span>
+                                            </template>
+                                        </div>
+                                        <template x-if="currentChat.partner_is_admin"><span class="admin-badge hidden md:inline-block">Admin</span></template>
+                                        <template x-if="currentChat.partner_is_moderator"><span class="mod-badge hidden md:inline-block">Moderator</span></template>
+                                    </div>
+                                    <div class="text-[11px] md:text-xs flex items-center gap-1 truncate">
                                         <span :class="currentChat.partner_is_banned ? 'text-red-700 font-semibold' : (typing[currentChat.chat_id] ? 'text-blue-400 italic animate-pulse' : (currentChat.custom_status ? 'text-blue-300 font-semibold' : (currentChat.is_online ? 'text-blue-400' : 'text-gray-400')))" 
                                               x-text="currentChat.partner_is_banned ? 'заблокирован' : (typing[currentChat.chat_id] ? 'печатает...' : (currentChat.custom_status ? currentChat.custom_status : (currentChat.is_online ? 'в сети' : 'был(а) ' + (currentChat.last_seen || 'недавно'))))"></span>
-                                    </template>
+                                    </div>
                                 </div>
                             </div>
                         </div>
 
-                        <template x-if="!currentChat.is_group">
-                            <div class="relative flex items-center" x-data="{ menuOpen: false }">
-                                <button @click="menuOpen = !menuOpen" class="p-2 text-gray-400 hover:text-white transition rounded-full hover:bg-gray-800">
-                                    <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M12 16a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2m0-6a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2z"></path></svg>
+                        <div class="relative flex items-center" x-data="{ menuOpen: false }">
+                            <button @click="menuOpen = !menuOpen" class="p-2 text-gray-400 hover:text-white transition rounded-full hover:bg-gray-800">
+                                <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M12 16a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2m0-6a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2m0-6a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2z"></path></svg>
+                            </button>
+                            <div x-show="menuOpen" @click.away="menuOpen = false" class="absolute right-0 top-full mt-2 w-48 bg-gray-800 rounded-2xl shadow-2xl border border-gray-700 py-2 z-50 text-sm font-medium">
+                                <button @click="menuOpen = false; openContactModal()" class="w-full text-left px-4 py-2 hover:bg-gray-700 text-white flex items-center gap-2">
+                                    <span x-text="currentChat.is_explicit_contact ? 'Изменить контакт' : 'Добавить контакт'"></span>
                                 </button>
-                                <div x-show="menuOpen" @click.away="menuOpen = false" class="absolute right-0 top-full mt-2 w-48 bg-gray-800 rounded-2xl shadow-2xl border border-gray-700 py-2 z-50 text-sm font-medium">
-                                    <button @click="menuOpen = false; openContactModal()" class="w-full text-left px-4 py-2 hover:bg-gray-700 text-white flex items-center gap-2">
-                                        <span x-text="currentChat.is_explicit_contact ? 'Изменить контакт' : 'Добавить контакт'"></span>
-                                    </button>
-                                    <button @click="menuOpen = false; togglePersonalBlock()" class="w-full text-left px-4 py-2 hover:bg-red-950/50 text-red-400 border-t border-gray-700/80 mt-1 flex items-center gap-2">
-                                        <span x-text="currentChat.i_blocked_partner ? 'Разблокировать' : 'Заблокировать'"></span>
-                                    </button>
-                                </div>
+                                <button @click="menuOpen = false; togglePersonalBlock()" class="w-full text-left px-4 py-2 hover:bg-red-950/50 text-red-400 border-t border-gray-700/80 mt-1 flex items-center gap-2">
+                                    <span x-text="currentChat.i_blocked_partner ? 'Разблокировать' : 'Заблокировать'"></span>
+                                </button>
                             </div>
-                        </template>
+                        </div>
                     </div>
 
                     <div class="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 max-h-full" id="messagesBox">
                         <template x-for="msg in messages" :key="msg.id">
-                            <div class="flex w-full flex-col" :class="msg.sender_id === myId ? 'items-end' : 'items-start'">
+                            <div class="flex w-full" :class="msg.sender_id === myId ? 'justify-end' : 'justify-start'">
+                                
                                 <div class="max-w-[85%] md:max-w-[70%] rounded-2xl px-3 py-2 md:px-4 shadow-md relative group flex flex-col select-text"
                                      :class="msg.is_deleted ? 'bg-red-950/40 border border-red-900 text-red-200 rounded-sm' : (msg.sender_id === myId ? 'bg-blue-600 text-white rounded-tr-sm' : 'bg-gray-800 text-gray-100 rounded-tl-sm')"
                                      @contextmenu.prevent="openContextMenu($event, msg, false)"
                                      @touchstart="handleTouchStart($event, msg)"
                                      @touchend="handleTouchEnd()"
                                      @touchmove="handleTouchEnd()">
-
-                                    <template x-if="currentChat.is_group && msg.sender_id !== myId && !msg.is_deleted">
-                                        <div class="text-[11px] font-bold mb-1 flex items-center gap-1.5 cursor-pointer" @click.stop="openUserProfile(msg.sender_id)">
-                                            <span class="text-indigo-400 hover:underline truncate" x-text="msg.sender_name"></span>
-                                            <template x-if="msg.sender_tag">
-                                                <span :class="(msg.sender_is_admin || msg.sender_is_owner) ? 'group-tag-admin' : 'group-tag-user'" x-text="msg.sender_tag"></span>
-                                            </template>
-                                        </div>
-                                    </template>
 
                                     <template x-if="msg.forwarded_from_id">
                                         <div @click.stop="startChat(msg.forwarded_from_id)" class="text-[11px] text-blue-300 font-medium mb-1 border-b border-blue-500/20 pb-0.5 cursor-pointer hover:underline truncate">
@@ -541,7 +588,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         </template>
                     </div>
 
-                    <div class="bg-gray-900 border-t border-gray-800 w-full flex-shrink-0 pb-safe relative">
+                    <div class="bg-gray-900 border-t border-gray-800 w-full flex-shrink-0 pb-safe">
                         
                         <div x-show="replyToMessage" style="display:none;" class="bg-gray-800/80 p-2 px-4 flex justify-between items-center text-xs text-gray-300 border-b border-gray-700/50">
                             <div class="truncate flex items-center gap-1">
@@ -566,67 +613,65 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             </div>
                         </div>
 
-                        <div x-show="showEmojiPicker" style="display:none;" class="absolute bottom-full left-2 mb-2 bg-gray-800 border border-gray-700 p-3 rounded-2xl grid grid-cols-6 gap-2 md:gap-3 text-2xl shadow-2xl z-50">
-                            <template x-for="emo in emojiList" :key="emo">
-                                <span class="cursor-pointer hover:scale-125 transition transform" @mousedown.prevent @touchstart.prevent @click="newMessage += emo; $refs.msgInput.focus(); showEmojiPicker=false" x-text="emo"></span>
-                            </template>
-                        </div>
-
                         <div class="p-2 md:p-4 flex items-center gap-2 md:gap-3 w-full max-w-4xl mx-auto">
                             
-                            <template x-if="!currentChat.is_group && currentChat.partner_is_banned">
-                                <div class="flex-1 bg-gray-800/60 text-red-700 font-bold text-sm md:text-base rounded-full px-4 py-2 md:py-3 flex items-center border border-red-900/30 select-none">Пользователь Заблокирован</div>
+                            <template x-if="currentChat.partner_is_banned">
+                                <div class="flex-1 bg-gray-800/60 text-red-700 font-bold text-sm md:text-base rounded-full px-4 py-2 md:py-3 flex items-center border border-red-900/30 select-none">
+                                    Пользователь Заблокирован
+                                </div>
                             </template>
-                            
-                            <template x-if="currentChat.is_group && currentChat.i_am_banned_in_group">
-                                <div class="flex-1 bg-red-950/40 text-red-400 font-bold text-sm md:text-base rounded-full px-4 py-2 md:py-3 flex items-center justify-center border border-red-900/50 select-none">Вы исключены из группы</div>
-                            </template>
-                            
-                            <template x-if="currentChat.is_group && !currentChat.i_am_banned_in_group && !currentChat.perms.send_text && !currentChat.i_am_admin && !currentChat.i_am_owner">
-                                <div class="flex-1 bg-gray-800 text-gray-500 font-bold text-sm md:text-base rounded-full px-4 py-2 md:py-3 flex items-center justify-center border border-gray-700 select-none">Отправка сообщений запрещена</div>
+                            <template x-if="currentChat.partner_is_banned">
+                                <button disabled class="flex-shrink-0 bg-blue-600/20 text-red-700 font-black rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center cursor-not-allowed border border-red-900/30">
+                                    <span class="text-xl">!</span>
+                                </button>
                             </template>
 
                             <template x-if="!currentChat.partner_is_banned && currentChat.i_blocked_partner">
-                                <div class="flex-1 bg-red-950/40 text-red-400 font-bold text-sm md:text-base rounded-full px-4 py-2 md:py-3 flex items-center justify-center border border-red-900/50 select-none">Вы заблокировали пользователя</div>
-                            </template>
-
-                            <template x-if="!currentChat.is_group && !currentChat.partner_is_banned && !currentChat.i_blocked_partner && currentChat.partner_blocked_me">
-                                <div class="flex-1 bg-red-950/40 text-red-400 font-bold text-sm md:text-base rounded-full px-4 py-2 md:py-3 flex items-center justify-center border border-red-900/50 select-none">Вы заблокированы</div>
-                            </template>
-
-                            <template x-if="canInputMessages()">
-                                <div class="flex items-center gap-1 md:gap-2">
-                                    <template x-if="currentChat.perms.send_photos || currentChat.i_am_admin || currentChat.i_am_owner">
-                                        <label class="cursor-pointer p-2 text-gray-400 hover:text-blue-500 transition flex-shrink-0">
-                                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
-                                            <input type="file" class="hidden" accept="image/*" @change="handleImageSelect">
-                                        </label>
-                                    </template>
-
-                                    <template x-if="currentChat.perms.send_emoji || currentChat.i_am_admin || currentChat.i_am_owner">
-                                        <button @mousedown.prevent @touchstart.prevent @click="showEmojiPicker = !showEmojiPicker" class="p-2 text-gray-400 hover:text-yellow-400 transition flex-shrink-0 text-xl">😀</button>
-                                    </template>
+                                <div class="flex-1 bg-red-950/40 text-red-400 font-bold text-sm md:text-base rounded-full px-4 py-2 md:py-3 flex items-center justify-center border border-red-900/50 select-none">
+                                    Вы заблокировали пользователя
                                 </div>
                             </template>
 
-                            <template x-if="canInputMessages() && !isRecording">
-                                <input type="text" x-ref="msgInput" x-model="newMessage" @keydown.enter="sendMessage()" @input="sendTyping()" placeholder="Сообщение..." class="flex-1 min-w-0 bg-gray-800 text-sm md:text-base text-white rounded-full px-4 py-2 md:py-3 focus:outline-none focus:ring-1 focus:ring-blue-500 shadow-inner">
+                            <template x-if="!currentChat.partner_is_banned && !currentChat.i_blocked_partner && currentChat.partner_blocked_me">
+                                <div class="flex-1 bg-red-950/40 text-red-400 font-bold text-sm md:text-base rounded-full px-4 py-2 md:py-3 flex items-center justify-center border border-red-900/50 select-none">
+                                    Вы заблокированы у пользователя
+                                </div>
                             </template>
 
-                            <template x-if="canInputMessages() && isRecording">
+                            <template x-if="!currentChat.partner_is_banned && !currentChat.i_blocked_partner && !currentChat.partner_blocked_me && showMicInstructionBanner">
+                                <div class="flex-1 bg-red-950/90 border border-red-700 text-red-100 rounded-2xl md:rounded-full px-4 py-2 md:py-3 flex flex-col md:flex-row items-center justify-center gap-1 text-center text-xs md:text-sm shadow-inner">
+                                    <span>Включите доступ приложению к микрофону в настройках и перезапустите приложение</span>
+                                    <a href="/micro" class="underline font-bold text-white hover:text-blue-300 whitespace-nowrap">(нажмите что бы получить инструкцию)</a>
+                                    <span class="font-bold text-red-400 whitespace-nowrap">— Запись не идет!</span>
+                                    <button @click="showMicInstructionBanner = false" class="ml-2 text-gray-400 hover:text-white font-bold text-sm hidden md:inline-block">✕</button>
+                                </div>
+                            </template>
+
+                            <template x-if="!currentChat.partner_is_banned && !currentChat.i_blocked_partner && !currentChat.partner_blocked_me && !isRecording && !showMicInstructionBanner">
+                                <label class="cursor-pointer p-2 text-gray-400 hover:text-blue-500 transition flex-shrink-0">
+                                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
+                                    <input type="file" class="hidden" accept="image/*" @change="handleImageSelect">
+                                </label>
+                            </template>
+
+                            <template x-if="!currentChat.partner_is_banned && !currentChat.i_blocked_partner && !currentChat.partner_blocked_me && !isRecording && !showMicInstructionBanner">
+                                <input type="text" x-model="newMessage" @keydown.enter="sendMessage()" @input="sendTyping()" placeholder="Сообщение..." class="flex-1 min-w-0 bg-gray-800 text-sm md:text-base text-white rounded-full px-4 py-2 md:py-3 focus:outline-none focus:ring-1 focus:ring-blue-500 shadow-inner">
+                            </template>
+
+                            <template x-if="!currentChat.partner_is_banned && !currentChat.i_blocked_partner && !currentChat.partner_blocked_me && isRecording && !showMicInstructionBanner">
                                  <div class="flex-1 bg-red-950/60 border border-red-800 text-red-200 rounded-full px-4 py-2 md:py-3 flex items-center justify-center gap-2 font-mono font-bold animate-pulse">
                                     <div class="w-3 h-3 rounded-full bg-red-500"></div>
                                     <span x-text="formatTimer(recordTimer)"></span>
                                 </div>
                             </template>
 
-                            <template x-if="canInputMessages() && !isRecording">
-                                 <button @mousedown.prevent @touchstart.prevent @click="sendMessage()" class="flex-shrink-0 bg-blue-600 hover:bg-blue-500 text-white rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center transition shadow-lg" :disabled="!newMessage.trim() && !imagePreview">
+                            <template x-if="!currentChat.partner_is_banned && !currentChat.i_blocked_partner && !currentChat.partner_blocked_me && !isRecording && !showMicInstructionBanner">
+                                 <button @click="sendMessage()" class="flex-shrink-0 bg-blue-600 hover:bg-blue-500 text-white rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center transition shadow-lg" :disabled="!newMessage.trim() && !imagePreview">
                                     <svg class="w-4 h-4 md:w-5 md:h-5 ml-1 transform -rotate-45" fill="currentColor" viewBox="0 0 20 20"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"></path></svg>
                                 </button>
                             </template>
 
-                            <template x-if="canInputMessages() && (currentChat.perms.send_voice || currentChat.i_am_admin || currentChat.i_am_owner)">
+                            <template x-if="!currentChat.partner_is_banned && !currentChat.i_blocked_partner && !currentChat.partner_blocked_me">
                                 <button type="button" @click="toggleVoiceRecord()" :class="isRecording ? 'bg-red-600 text-white animate-pulse' : 'bg-gray-700 hover:bg-gray-600 text-gray-300'" class="flex-shrink-0 rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center transition shadow-lg">
                                     <svg class="w-4 h-4 md:w-5 md:h-5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z" clip-rule="evenodd"></path></svg>
                                 </button>
@@ -638,194 +683,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </template>
         </div>
 
-        <div x-show="showGroupProfileModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" @click.self="showGroupProfileModal = false">
-            <div class="bg-[#1e293b] p-0 rounded-2xl border border-gray-700 w-full max-w-md shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-                <div class="p-6 pb-4 bg-gradient-to-b from-blue-900/40 to-[#1e293b] flex items-center justify-between border-b border-gray-800">
-                    <h2 class="text-xl font-bold text-white flex items-center gap-2"><span>👥</span> Профиль группы</h2>
-                    <div class="flex gap-2">
-                        <template x-if="groupData.i_am_admin || groupData.i_am_owner || groupData.perms.change_profile">
-                            <button @click="groupEditMode = !groupEditMode" class="text-gray-400 hover:text-blue-400 p-1"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg></button>
-                        </template>
-                        <button @click="showGroupProfileModal = false" class="text-gray-400 hover:text-white p-1 font-bold">✕</button>
-                    </div>
-                </div>
-
-                <div class="flex border-b border-gray-800 text-sm">
-                    <button @click="groupTab = 'info'" class="flex-1 py-3 font-semibold transition" :class="groupTab === 'info' ? 'text-blue-400 border-b-2 border-blue-500 bg-gray-800' : 'text-gray-400 hover:text-gray-200'">Информация</button>
-                    <button @click="groupTab = 'members'" class="flex-1 py-3 font-semibold transition" :class="groupTab === 'members' ? 'text-blue-400 border-b-2 border-blue-500 bg-gray-800' : 'text-gray-400 hover:text-gray-200'">Участники</button>
-                    <template x-if="groupData.i_am_admin || groupData.i_am_owner">
-                        <button @click="groupTab = 'settings'" class="flex-1 py-3 font-semibold transition" :class="groupTab === 'settings' ? 'text-blue-400 border-b-2 border-blue-500 bg-gray-800' : 'text-gray-400 hover:text-gray-200'">Права</button>
-                    </template>
-                </div>
-
-                <div class="p-6 overflow-y-auto flex-1">
-                    <template x-if="groupTab === 'info'">
-                        <div>
-                            <div class="flex flex-col items-center mb-6 relative group">
-                                <div class="w-24 h-24 rounded-full bg-gradient-to-tr from-green-500 to-blue-500 flex items-center justify-center text-4xl text-white shadow-lg overflow-hidden relative">
-                                    <img x-show="groupData.avatar_url" :src="groupData.avatar_url" class="w-full h-full object-cover">
-                                    <span x-show="!groupData.avatar_url">👥</span>
-                                    <template x-if="groupEditMode">
-                                        <label class="absolute inset-0 bg-black/60 hidden group-hover:flex items-center justify-center cursor-pointer transition">
-                                            <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 16V8a2 2 0 012-2h3l1-2h6l1 2h3a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 13a3 3 0 100-6 3 3 0 000 6z"></path></svg>
-                                            <input type="file" class="hidden" accept="image/*" @change="handleGroupAvatarSelect">
-                                        </label>
-                                    </template>
-                                </div>
-                            </div>
-                            
-                            <template x-if="!groupEditMode">
-                                <div class="space-y-4 text-center">
-                                    <h3 class="text-2xl font-black text-white" x-text="groupData.name"></h3>
-                                    <p class="text-sm text-gray-400 italic" x-text="groupData.description || 'Описание отсутствует'"></p>
-                                    <div class="pt-4 text-xs font-mono text-gray-500 border-t border-gray-800">ID Группы: <span x-text="groupData.chat_id"></span></div>
-                                    <button @click="executeLeaveGroup()" class="mt-4 w-full bg-red-900/40 hover:bg-red-800/60 text-red-400 border border-red-800/50 py-2 rounded-xl text-sm font-bold transition">Покинуть группу</button>
-                                </div>
-                            </template>
-
-                            <template x-if="groupEditMode">
-                                <div class="space-y-3">
-                                    <div><label class="text-xs text-blue-400 font-bold mb-1 block">Название группы</label>
-                                    <input type="text" x-model="groupData.name" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white text-sm outline-none focus:border-blue-500"></div>
-                                    <div><label class="text-xs text-blue-400 font-bold mb-1 block">Описание</label>
-                                    <textarea x-model="groupData.description" rows="3" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white text-sm outline-none focus:border-blue-500"></textarea></div>
-                                    <button @click="saveGroupProfile()" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 rounded-xl transition mt-2">Сохранить профиль</button>
-                                </div>
-                            </template>
-                        </div>
-                    </template>
-
-                    <template x-if="groupTab === 'members'">
-                        <div>
-                            <template x-if="groupData.perms.add_members || groupData.i_am_admin || groupData.i_am_owner">
-                                <div class="mb-4 flex gap-2">
-                                    <input type="text" x-model="groupAddUserQuery" placeholder="Ник (@username) для добавления" class="flex-1 bg-gray-900 border border-gray-600 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-blue-500">
-                                    <button @click="executeAddGroupMember()" class="bg-blue-600 hover:bg-blue-500 text-white px-4 rounded-lg font-bold text-sm">Добавить</button>
-                                </div>
-                            </template>
-                            <div class="space-y-2">
-                                <template x-for="m in groupMembers" :key="m.user_id">
-                                    <div class="bg-gray-800 p-2.5 rounded-xl border border-gray-700 flex items-center justify-between group">
-                                        <div class="flex items-center gap-3 cursor-pointer" @click="openUserProfile(m.user_id)">
-                                            <div class="w-8 h-8 rounded-full overflow-hidden bg-gray-700 flex-shrink-0 flex items-center justify-center">
-                                                <img x-show="m.avatar" :src="m.avatar" class="w-full h-full object-cover">
-                                                <span x-show="!m.avatar" x-text="m.name[0]"></span>
-                                            </div>
-                                            <div>
-                                                <div class="text-sm font-bold text-white flex items-center gap-1.5">
-                                                    <span x-text="m.name"></span>
-                                                    <template x-if="m.is_owner"><span class="text-[9px] bg-yellow-600/30 text-yellow-400 px-1.5 py-0.5 rounded border border-yellow-600/50 uppercase">Владелец</span></template>
-                                                    <template x-if="!m.is_owner && m.is_admin"><span class="text-[9px] bg-blue-600/30 text-blue-400 px-1.5 py-0.5 rounded border border-blue-600/50 uppercase">Админ</span></template>
-                                                </div>
-                                                <div class="text-[10px] text-gray-400" x-text="'@' + m.username"></div>
-                                            </div>
-                                        </div>
-                                        <div class="flex items-center gap-2">
-                                            <template x-if="m.role_tag"><span :class="(m.is_admin || m.is_owner) ? 'group-tag-admin' : 'group-tag-user'" x-text="m.role_tag"></span></template>
-                                            <template x-if="groupData.i_am_owner || (groupData.i_am_admin && !m.is_owner)">
-                                                <button @click="openManageMember(m)" class="text-gray-500 hover:text-white p-1 transition"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg></button>
-                                            </template>
-                                        </div>
-                                    </div>
-                                </template>
-                            </div>
-                        </div>
-                    </template>
-
-                    <template x-if="groupTab === 'settings'">
-                        <div class="space-y-4">
-                            <h4 class="text-xs font-black text-gray-400 uppercase tracking-wider">Глобальные разрешения</h4>
-                            <p class="text-[10px] text-gray-500 -mt-2">Ограничения применяются ко всем участникам, кроме администраторов.</p>
-                            
-                            <div class="bg-gray-800 p-3 rounded-xl border border-gray-700 space-y-3">
-                                <label class="flex items-center justify-between cursor-pointer"><span class="text-sm font-medium text-white">Отправка сообщений</span><input type="checkbox" x-model="groupData.perms.send_text" class="w-4 h-4"></label>
-                                <label class="flex items-center justify-between cursor-pointer"><span class="text-sm font-medium text-white">Отправка фотографий</span><input type="checkbox" x-model="groupData.perms.send_photos" class="w-4 h-4"></label>
-                                <label class="flex items-center justify-between cursor-pointer"><span class="text-sm font-medium text-white">Голосовые сообщения</span><input type="checkbox" x-model="groupData.perms.send_voice" class="w-4 h-4"></label>
-                                <label class="flex items-center justify-between cursor-pointer"><span class="text-sm font-medium text-white">Использование эмодзи</span><input type="checkbox" x-model="groupData.perms.send_emoji" class="w-4 h-4"></label>
-                            </div>
-                            <h4 class="text-xs font-black text-gray-400 uppercase tracking-wider mt-4">Права группы</h4>
-                            <div class="bg-gray-800 p-3 rounded-xl border border-gray-700 space-y-3">
-                                <label class="flex items-center justify-between cursor-pointer"><span class="text-sm font-medium text-white">Добавление участников</span><input type="checkbox" x-model="groupData.perms.add_members" class="w-4 h-4"></label>
-                                <label class="flex items-center justify-between cursor-pointer"><span class="text-sm font-medium text-white">Изменение профиля группы</span><input type="checkbox" x-model="groupData.perms.change_profile" class="w-4 h-4"></label>
-                            </div>
-                            <button @click="saveGroupPerms()" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 rounded-xl transition mt-4">Сохранить разрешения</button>
-                        </div>
-                    </template>
-                </div>
-            </div>
-        </div>
-
-        <div x-show="showManageMemberModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" @click.self="showManageMemberModal = false">
-            <div class="bg-[#1e293b] p-6 rounded-2xl border border-blue-500/30 w-full max-w-sm shadow-2xl flex flex-col max-h-[90vh]">
-                <h3 class="text-white font-bold text-lg border-b border-gray-700 pb-2 mb-4" x-text="'Управление: ' + manageMemberData.name"></h3>
-                
-                <div class="overflow-y-auto flex-1 pr-1 space-y-4">
-                    <template x-if="groupData.i_am_owner || (groupData.i_am_admin && groupData.my_perms.change_tags)">
-                        <div>
-                            <label class="text-xs font-bold text-blue-400 block mb-1">Кастомный Тег</label>
-                            <input type="text" x-model="manageMemberData.role_tag" placeholder="Например: Модератор" class="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white text-sm outline-none focus:border-blue-500">
-                        </div>
-                    </template>
-
-                    <template x-if="groupData.i_am_owner || (groupData.i_am_admin && groupData.my_perms.assign_admins)">
-                        <div class="bg-gray-800 p-3 rounded-xl border border-gray-700">
-                            <label class="flex items-center justify-between cursor-pointer mb-2 border-b border-gray-700 pb-2">
-                                <span class="text-sm font-bold text-red-400">Назначить Администратором</span>
-                                <input type="checkbox" x-model="manageMemberData.is_admin" class="w-4 h-4">
-                            </label>
-                            
-                            <div x-show="manageMemberData.is_admin" class="space-y-2 mt-2">
-                                <p class="text-[10px] text-gray-500 leading-tight mb-2">Вы можете выдать только те права, которыми обладаете сами.</p>
-                                
-                                <label class="flex items-center gap-2 cursor-pointer" :class="!(groupData.i_am_owner || groupData.my_perms.change_profile) ? 'opacity-50' : ''">
-                                    <input type="checkbox" x-model="manageMemberData.perm_change_profile" :disabled="!(groupData.i_am_owner || groupData.my_perms.change_profile)" class="w-3.5 h-3.5">
-                                    <span class="text-xs text-white">Изменение профиля</span>
-                                </label>
-                                <label class="flex items-center gap-2 cursor-pointer" :class="!(groupData.i_am_owner || groupData.my_perms.delete_msgs) ? 'opacity-50' : ''">
-                                    <input type="checkbox" x-model="manageMemberData.perm_delete_msgs" :disabled="!(groupData.i_am_owner || groupData.my_perms.delete_msgs)" class="w-3.5 h-3.5">
-                                    <span class="text-xs text-white">Удаление чужих сообщений</span>
-                                </label>
-                                <label class="flex items-center gap-2 cursor-pointer" :class="!(groupData.i_am_owner || groupData.my_perms.ban_users) ? 'opacity-50' : ''">
-                                    <input type="checkbox" x-model="manageMemberData.perm_ban_users" :disabled="!(groupData.i_am_owner || groupData.my_perms.ban_users)" class="w-3.5 h-3.5">
-                                    <span class="text-xs text-white">Блокировка (исключение)</span>
-                                </label>
-                                <label class="flex items-center gap-2 cursor-pointer" :class="!(groupData.i_am_owner || groupData.my_perms.change_tags) ? 'opacity-50' : ''">
-                                    <input type="checkbox" x-model="manageMemberData.perm_change_tags" :disabled="!(groupData.i_am_owner || groupData.my_perms.change_tags)" class="w-3.5 h-3.5">
-                                    <span class="text-xs text-white">Изменение тегов</span>
-                                </label>
-                                <template x-if="groupData.i_am_owner">
-                                    <label class="flex items-center gap-2 cursor-pointer">
-                                        <input type="checkbox" x-model="manageMemberData.perm_assign_admins" class="w-3.5 h-3.5">
-                                        <span class="text-xs text-red-300 font-bold">Назначение админов</span>
-                                    </label>
-                                </template>
-                            </div>
-                        </div>
-                    </template>
-                </div>
-
-                <div class="mt-4 flex flex-col gap-2">
-                    <button @click="saveManageMember()" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 rounded-xl transition">Сохранить</button>
-                    <template x-if="groupData.i_am_owner || (groupData.i_am_admin && groupData.my_perms.ban_users)">
-                        <button @click="executeKickMember()" class="w-full bg-red-900/40 hover:bg-red-800 text-red-400 font-bold py-1.5 rounded-xl transition text-xs border border-red-800">Исключить пользователя</button>
-                    </template>
-                    <button @click="showManageMemberModal = false" class="w-full bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 rounded-xl transition">Закрыть</button>
-                </div>
-            </div>
-        </div>
-
-        <div x-show="showGroupCreateModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" @click.self="showGroupCreateModal = false">
-            <div class="bg-[#1e293b] p-6 rounded-2xl border border-blue-500/40 w-full max-w-sm shadow-2xl text-white">
-                <h3 class="font-bold text-xl mb-4 text-center">Создание Группы</h3>
-                <input type="text" x-model="newGroupName" placeholder="Название группы..." class="w-full bg-gray-900 border border-gray-600 rounded-xl p-3 text-white text-sm outline-none focus:ring-1 focus:ring-blue-500 mb-4">
-                <div class="flex gap-2">
-                    <button @click="executeCreateGroup()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 rounded-xl transition text-sm">Создать</button>
-                    <button @click="showGroupCreateModal = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-bold py-2.5 rounded-xl transition text-sm">Отмена</button>
-                </div>
-            </div>
-        </div>
-
-        <div x-show="showContactModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" @click.self="showContactModal = false">...</div>
         <div x-show="showContactModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" @click.self="showContactModal = false">
             <div class="bg-[#1e293b] p-6 rounded-2xl border border-gray-700 w-full max-w-sm shadow-2xl">
                 <h3 class="text-white font-bold text-lg mb-2">Никнейм контакта</h3>
@@ -837,7 +694,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 </div>
             </div>
         </div>
-        
+
         <div x-show="showProfileModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" @click.self="closeProfileModal()">
              <div class="bg-[#242f3d] w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden flex flex-col relative text-gray-100 max-h-[90vh]">
 
@@ -1039,7 +896,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         </div>
 
-        <div x-show="showQuestsModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" @click.self="showQuestsModal = false">...</div>
         <div x-show="showQuestsModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" @click.self="showQuestsModal = false">
             <div class="bg-[#1e293b] p-6 rounded-2xl border border-blue-500/40 w-full max-w-md shadow-2xl text-white max-h-[85vh] overflow-y-auto">
                 <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-3">
@@ -1095,6 +951,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 </template>
 
                 <div class="flex-1 overflow-y-auto min-h-[250px] pr-1">
+                    
                     <template x-if="!shopModeInventory && shopTab === 'official'">
                         <div class="grid grid-cols-2 gap-3">
                             <template x-for="item in shopOfficial" :key="item.def_id">
@@ -1110,6 +967,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             </template>
                         </div>
                     </template>
+
                     <template x-if="!shopModeInventory && shopTab === 'market'">
                         <div>
                             <template x-if="shopMarket.length === 0">
@@ -1132,6 +990,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             </div>
                         </div>
                     </template>
+
                     <template x-if="shopModeInventory">
                         <div>
                             <template x-if="myGiftsInventory.length === 0">
@@ -1157,6 +1016,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             </div>
                          </div>
                     </template>
+
                 </div>
             </div>
         </div>
@@ -1191,20 +1051,26 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
         <div x-show="showGiftViewModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" @click.self="showGiftViewModal = false">
             <div class="bg-[#1e293b] p-6 rounded-3xl border border-blue-500/40 w-full max-w-xs shadow-2xl text-white text-center flex flex-col items-center relative">
                 <button @click="showGiftViewModal = false" class="absolute top-4 right-4 text-gray-400 hover:text-white font-bold">✕</button>
+                
                 <div class="text-xs font-mono text-blue-400 font-bold bg-blue-500/10 border border-blue-500/30 px-3 py-1 rounded-full mb-3">
                     Подарок #<span x-text="selectedGiftView ? selectedGiftView.user_gift_id : ''"></span>
                 </div>
+
                 <img :src="selectedGiftView ? selectedGiftView.img : ''" class="w-24 h-24 md:w-28 md:h-28 object-contain my-2 filter drop-shadow-xl">
+
                 <h3 class="text-lg font-black text-white mt-1" x-text="selectedGiftView ? selectedGiftView.name : ''"></h3>
                 <div class="text-xs text-gray-400 mt-0.5 flex items-center justify-center gap-1">Гос. стоимость: <span class="text-white font-bold" x-text="selectedGiftView ? selectedGiftView.store_price : ''"></span> <img src="/molniya.png" class="w-4 h-4 inline-block align-middle"></div>
+
                 <template x-if="isMyProfile && selectedGiftView">
                     <div class="w-full mt-5 pt-4 border-t border-gray-700/80 space-y-2" x-data="{ inputSalePrice: '' }">
                         <template x-if="selectedGiftView.is_pinned">
                             <button @click="executeUnpinGiftSlot(selectedGiftView.slot_index)" class="w-full bg-gray-700 hover:bg-gray-600 text-white font-bold py-2.5 rounded-xl text-xs transition">Открепить от профиля</button>
                         </template>
+
                         <div class="flex gap-1.5 pt-1">
                              <input type="number" x-model="inputSalePrice" placeholder="Цена" class="w-1/2 bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs text-center outline-none">
-                            <button @click="executeToggleMarketSale(selectedGiftView.user_gift_id, inputSalePrice)" class="w-1/2 bg-blue-600 hover:bg-blue-500 text-white font-black py-2 rounded-xl text-xs transition shadow flex items-center justify-center gap-0.5">
+                            <button @click="executeToggleMarketSale(selectedGiftView.user_gift_id, inputSalePrice)" 
+                                    class="w-1/2 bg-blue-600 hover:bg-blue-500 text-white font-black py-2 rounded-xl text-xs transition shadow flex items-center justify-center gap-0.5">
                                 <span x-text="selectedGiftView.is_for_sale ? 'Снять' : 'На Маркет'"></span>
                                 <template x-if="!selectedGiftView.is_for_sale"><img src="/molniya.png" class="w-3.5 h-3.5 inline-block"></template>
                             </button>
@@ -1231,13 +1097,12 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 newMessage: '',
                 imagePreview: null,
                 typing: {},
-                
-                showEmojiPicker: false,
-                emojiList: ['😀','😂','🥰','😎','🤔','😭','😡','👍','👎','❤️','🔥','🎉','✨','💩','🤡','💀','👀','🙏'],
 
                 // ОЧЕРЕДЬ ОТПРАВКИ СОХРАНЯЕТСЯ В LOCALSTORAGE!
                 pendingMessagesToSend: JSON.parse(localStorage.getItem('youme_pending_queue') || '{}'), 
-                savePendingQueue() { localStorage.setItem('youme_pending_queue', JSON.stringify(this.pendingMessagesToSend)); },
+                savePendingQueue() {
+                    localStorage.setItem('youme_pending_queue', JSON.stringify(this.pendingMessagesToSend));
+                },
 
                 isRecording: false,
                 showMicInstructionBanner: false,
@@ -1249,19 +1114,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 showContactModal: false,
                 contactCustomName: '',
 
-                // ГРУППЫ
-                showGroupCreateModal: false,
-                newGroupName: '',
-                showGroupProfileModal: false,
-                groupTab: 'info',
-                groupEditMode: false,
-                groupData: { perms: {}, my_perms: {} },
-                groupMembers: [],
-                groupAddUserQuery: '',
-                showManageMemberModal: false,
-                manageMemberData: {},
-
-                // ПОДАРКИ И КВЕСТЫ
+                 // ПОДАРКИ И КВЕСТЫ
                 showQuestsModal: false,
                 questItems: {},
                 showShopModal: false,
@@ -1302,6 +1155,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     
                     this.socket.on('connect', () => { 
                         this.loadChats(); 
+                        // ПРИ ПОЯВЛЕНИИ СВЯЗИ ВЫСТРЕЛЮ В СОКЕТ ЛОКАЛЬНОЙ ОЧЕРЕДЬЮ ИЗ ПАМЯТИ
                         for (let tId in this.pendingMessagesToSend) {
                              this.socket.emit('send_message', this.pendingMessagesToSend[tId]);
                         }
@@ -1313,12 +1167,13 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             if(data.sender_id !== this.myId) {
                                 this.reloadCurrentMessages();
                             } else {
+                                // ПОДТВЕРЖДЕНИЕ НАШЕГО СООБЩЕНИЯ С СЕРВЕРА
                                 let match = this.messages.find(m => m.client_temp_id === data.client_temp_id || m.id === data.client_temp_id);
                                 if (match) {
                                     match.id = data.id;
-                                    match.is_pending = false; 
+                                    match.is_pending = false; // ⏳ ПРЕВРАЩАЕТСЯ В ✓
                                     delete this.pendingMessagesToSend[data.client_temp_id];
-                                    this.savePendingQueue(); 
+                                    this.savePendingQueue(); // СОХРАНЯЕМ В ЛОКАЛ
                                 } else {
                                     this.messages.push(data);
                                 }
@@ -1326,7 +1181,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             }
                         } else if (data.sender_id === this.myId && data.client_temp_id) {
                             delete this.pendingMessagesToSend[data.client_temp_id];
-                            this.savePendingQueue(); 
+                            this.savePendingQueue(); // СОХРАНЯЕМ В ЛОКАЛ
                         }
                         this.loadChats();
                     });
@@ -1353,14 +1208,14 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         });
                     });
                     this.socket.on('status_update', (data) => {
-                         let chat = this.chats.find(c => c.partner_id === data.user_id && !c.is_group);
+                         let chat = this.chats.find(c => c.partner_id === data.user_id);
                          let customStatus = (this.myProfileData.perm_see_chatting_with && data.chatting_with_name) ? `общается с: ${data.chatting_with_name}` : null;
                          if (chat) {
                              chat.is_online = data.status === 'online';
                              if(data.last_seen) chat.last_seen = data.last_seen;
                              chat.custom_status = customStatus;
                          }
-                         if (this.currentChat && !this.currentChat.is_group && this.currentChat.partner_id === data.user_id) {
+                         if (this.currentChat && this.currentChat.partner_id === data.user_id) {
                              this.currentChat.is_online = data.status === 'online';
                              if(data.last_seen) this.currentChat.last_seen = data.last_seen;
                              this.currentChat.custom_status = customStatus;
@@ -1392,14 +1247,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         this.contextMenu.x = Math.min(e.clientX, window.innerWidth - 190);
                         this.contextMenu.y = Math.min(e.clientY, window.innerHeight - 200);
                     }
-                    // Права на удаление: свои можем удалять всегда. Чужие - если админ аппки ИЛИ если это группа и мы там админ с правами
-                    let canDel = msg.sender_id === this.myId || this.myProfileData.is_admin;
-                    if(this.currentChat && this.currentChat.is_group && !canDel) {
-                        if(this.currentChat.i_am_owner || (this.currentChat.i_am_admin && this.currentChat.my_perms.delete_msgs)) {
-                            canDel = true;
-                        }
-                    }
-                    this.contextMenu.canDelete = canDel;
                     this.contextMenu.show = true;
                 },
                 handleTouchStart(e, msg) {
@@ -1425,8 +1272,9 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         forwarded_from_id: this.forwardMessageTarget.sender_id
                     };
                     this.pendingMessagesToSend[tempId] = payload;
-                    this.savePendingQueue(); 
+                    this.savePendingQueue(); // СОХРАНЯЕМ В ЛОКАЛ
                     if(this.socket.connected) this.socket.emit('send_message', payload);
+                    
                     this.forwardModal = false; this.forwardMessageTarget = null; this.loadChats();
                 },
                 actionDelete() {
@@ -1486,93 +1334,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         this.viewProfileData = { ...this.myProfileData };
                         this.editMode = false; this.privacyMode = false;
                     }
-                },
-
-                // ГРУППЫ API
-                async executeCreateGroup() {
-                    if(!this.newGroupName.trim()) return;
-                    const res = await fetch('/api/chat/group/create', {
-                        method: 'POST', headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ name: this.newGroupName.trim() })
-                    });
-                    const data = await res.json();
-                    this.newGroupName = '';
-                    this.showGroupCreateModal = false;
-                    await this.loadChats();
-                    const chat = this.chats.find(c => c.chat_id === data.chat_id);
-                    if (chat) this.openChat(chat);
-                },
-                async openGroupProfile(chatId) {
-                    const res = await fetch('/api/chat/group/' + chatId + '/info');
-                    this.groupData = await res.json();
-                    this.groupMembers = this.groupData.members;
-                    this.groupTab = 'info';
-                    this.groupEditMode = false;
-                    this.showGroupProfileModal = true;
-                },
-                handleGroupAvatarSelect(event) {
-                    const file = event.target.files[0];
-                    if (!file) return;
-                    const reader = new FileReader();
-                    reader.onload = (e) => { this.groupData.avatar_url = e.target.result; };
-                    reader.readAsDataURL(file);
-                },
-                async saveGroupProfile() {
-                    await fetch('/api/chat/group/' + this.groupData.chat_id + '/update', {
-                        method: 'POST', headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ name: this.groupData.name, description: this.groupData.description, avatar_url: this.groupData.avatar_url })
-                    });
-                    this.groupEditMode = false;
-                    await this.loadChats();
-                    const updated = this.chats.find(c => c.chat_id === this.currentChat.chat_id);
-                    if(updated) this.currentChat = updated;
-                },
-                async saveGroupPerms() {
-                    await fetch('/api/chat/group/' + this.groupData.chat_id + '/update_perms', {
-                        method: 'POST', headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify(this.groupData.perms)
-                    });
-                    alert("Разрешения сохранены");
-                },
-                async executeAddGroupMember() {
-                    if(!this.groupAddUserQuery) return;
-                    const res = await fetch('/api/chat/group/' + this.groupData.chat_id + '/add_member', {
-                        method: 'POST', headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ username: this.groupAddUserQuery.replace('@','') })
-                    });
-                    const data = await res.json();
-                    if(data.success) {
-                        this.groupAddUserQuery = '';
-                        this.openGroupProfile(this.groupData.chat_id);
-                    } else alert(data.error);
-                },
-                openManageMember(member) {
-                    this.manageMemberData = { ...member };
-                    this.showManageMemberModal = true;
-                },
-                async saveManageMember() {
-                    await fetch('/api/chat/group/' + this.groupData.chat_id + '/admin', {
-                        method: 'POST', headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify(this.manageMemberData)
-                    });
-                    this.showManageMemberModal = false;
-                    this.openGroupProfile(this.groupData.chat_id);
-                },
-                async executeKickMember() {
-                    if(!confirm("Исключить пользователя из группы?")) return;
-                    await fetch('/api/chat/group/' + this.groupData.chat_id + '/kick', {
-                        method: 'POST', headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ target_id: this.manageMemberData.user_id })
-                    });
-                    this.showManageMemberModal = false;
-                    this.openGroupProfile(this.groupData.chat_id);
-                },
-                async executeLeaveGroup() {
-                    if(!confirm("Покинуть группу навсегда?")) return;
-                    await fetch('/api/chat/group/' + this.groupData.chat_id + '/leave', { method: 'POST' });
-                    this.showGroupProfileModal = false;
-                    this.closeChat();
-                    this.loadChats();
                 },
 
                 openContactModal() {
@@ -1645,6 +1406,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         }
                         this.showShopModal = true;
                     } else {
+                        // ЧУЖОЙ ПРОФИЛЬ -> ВЫВОЖУ ВСЕ ЕГО ПОДАРКИ!
                         const res = await fetch('/api/gifts/user/' + this.viewProfileData.id);
                         this.partnerGiftsList = await res.json();
                         this.showPartnerGiftsModal = true;
@@ -1741,6 +1503,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     if (!this.currentChat) return;
                     const res = await fetch('/api/chat/' + this.currentChat.chat_id + '/messages');
                     let dbMsgs = await res.json();
+                    // ПОДМЕШИВАЕМ ЛОКАЛЬНЫЕ НЕОТПРАВЛЕННЫЕ СООБЩЕНИЯ ИЗ ПАМЯТИ (⏳)
                     let unconfirmed = [];
                     for (let tId in this.pendingMessagesToSend) {
                         let p = this.pendingMessagesToSend[tId];
@@ -1756,14 +1519,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     this.messages = [...dbMsgs, ...unconfirmed];
                     this.scrollToBottom();
                 },
-                
-                canInputMessages() {
-                    if(!this.currentChat) return false;
-                    if(!this.currentChat.is_group) return !this.currentChat.partner_is_banned && !this.currentChat.i_blocked_partner && !this.currentChat.partner_blocked_me;
-                    if(this.currentChat.i_am_banned_in_group) return false;
-                    if(this.currentChat.i_am_admin || this.currentChat.i_am_owner) return true;
-                    return this.currentChat.perms.send_text || this.currentChat.perms.send_photos || this.currentChat.perms.send_voice || this.imagePreview;
-                },
 
                 handleImageSelect(event) {
                     const file = event.target.files[0];
@@ -1774,16 +1529,13 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 },
                 sendMessage() {
                     if (!this.newMessage.trim() && !this.imagePreview) return;
-                    
-                    // ДОПОЛНИТЕЛЬНО: ФОКУС ПРИНУДИТЕЛЬНО (В связке с @mousedown.prevent на кнопке)
-                    if(this.$refs.msgInput) this.$refs.msgInput.focus();
-
                     if (this.editMessage) {
                         this.socket.emit('edit_message', {
                             message_id: this.editMessage.id, text: this.newMessage.trim()
                         });
                         this.editMessage = null;
                     } else {
+                        // ЛОКАЛЬНАЯ ОЧЕРЕДЬ ОТПРАВКИ (⏳) СОХРАНЯЕТСЯ ТЕПЕРЬ И В ПАМЯТЬ УСТРОЙСТВА
                         let tempId = 'pending_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4);
                         let payload = {
                             client_temp_id: tempId,
@@ -1796,14 +1548,14 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             text: payload.text, image_base64: payload.image_base64, voice_base64: null,
                             time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
                             is_read: false, is_deleted: false, is_edited: false,
-                            is_pending: true,
+                            is_pending: true, // ВЕШАЕМ ЧАСИКИ ⏳
                             reply_to_id: payload.reply_to_id, reply_text: repText
                         };
                         this.messages.push(localObj);
                         this.scrollToBottom();
 
                         this.pendingMessagesToSend[tempId] = payload;
-                        this.savePendingQueue(); 
+                        this.savePendingQueue(); // СОХРАНЯЕМ В ЛОКАЛ
                         
                         if (this.socket.connected) this.socket.emit('send_message', payload);
                         
@@ -1811,7 +1563,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     }
                     this.newMessage = '';
                     this.imagePreview = null;
-                    this.showEmojiPicker = false;
                 },
 
                 async toggleVoiceRecord() {
@@ -1858,14 +1609,14 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                     text: '', image_base64: null, voice_base64: base64Audio,
                                     time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
                                     is_read: false, is_deleted: false, is_edited: false,
-                                    is_pending: true,
+                                    is_pending: true, // ВЕШАЕМ ЧАСИКИ ⏳
                                     reply_to_id: payload.reply_to_id, reply_text: repText
                                 };
                                 this.messages.push(localObj);
                                 this.scrollToBottom();
 
                                 this.pendingMessagesToSend[tempId] = payload;
-                                this.savePendingQueue(); 
+                                this.savePendingQueue(); // СОХРАНЯЕМ В ЛОКАЛ
                                 
                                 if (this.socket.connected) this.socket.emit('send_message', payload);
 
@@ -1899,7 +1650,234 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 </body></html>
 """
 
-ADMIN_TEMPLATE = BASE_HTML_HEAD + """...""" # Остается без изменений
+ADMIN_TEMPLATE = BASE_HTML_HEAD + """
+    <div class="container mx-auto p-4 md:p-6 pt-10 flex-1 overflow-y-auto max-h-full" x-data="adminApp()">
+        <div class="flex justify-between items-center mb-8 flex-shrink-0">
+            <h1 class="text-xl md:text-3xl font-bold text-white">Панель Управления</h1>
+            <a href="{{ url_for('index') }}" class="text-blue-400 hover:text-blue-300 transition text-sm md:text-base">&larr; В мессенджер</a>
+        </div>
+
+        {% with messages = get_flashed_messages() %}{% if messages %}
+            <div class="bg-blue-500/20 text-blue-300 p-3 rounded mb-4 text-sm border border-blue-500">
+              {% for message in messages %}{{ message }}<br>{% endfor %}
+            </div>
+        {% endif %}{% endwith %}
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            {% if current_user.is_admin or current_user.perm_grant_lightnings %}
+            <form action="{{ url_for('admin_grant_lightnings') }}" method="POST" class="bg-gray-800 p-4 rounded-2xl border border-gray-700 flex flex-col gap-2.5 shadow">
+                <div class="font-black text-blue-400 text-xs md:text-sm flex items-center gap-1"><img src="/molniya.png" class="w-5 h-5 object-contain"><span>Зачислить молнии</span></div>
+                <select name="user_id" class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
+                    {% for u in users %}<option value="{{ u.id }}">{{ u.username }} ({{ u.first_name }})</option>{% endfor %}
+                </select>
+                <input type="number" name="amount" placeholder="Количество" required class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
+                <button type="submit" class="bg-blue-600 hover:bg-blue-500 text-white font-black py-2 rounded-xl text-xs transition">Зачислить</button>
+            </form>
+
+            <form action="{{ url_for('admin_deduct_lightnings') }}" method="POST" class="bg-gray-800 p-4 rounded-2xl border border-gray-700 flex flex-col gap-2.5 shadow">
+                <div class="font-black text-red-400 text-xs md:text-sm flex items-center gap-1"><img src="/molniya.png" class="w-5 h-5 object-contain"><span>Списать молнии</span></div>
+                <select name="user_id" class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
+                    {% for u in users %}<option value="{{ u.id }}">{{ u.username }} ({{ u.first_name }})</option>{% endfor %}
+                </select>
+                <input type="number" name="amount" placeholder="Количество" required class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
+                <button type="submit" class="bg-red-600 hover:bg-red-500 text-white font-black py-2 rounded-xl text-xs transition">Списать</button>
+            </form>
+            {% endif %}
+
+            {% if current_user.is_admin or current_user.perm_grant_gifts %}
+            <form action="{{ url_for('admin_grant_gift') }}" method="POST" class="bg-gray-800 p-4 rounded-2xl border border-gray-700 flex flex-col gap-2.5 shadow">
+                <div class="font-black text-blue-400 text-xs md:text-sm flex items-center gap-1"><span>🎁</span><span>Выдать подарок</span></div>
+                <select name="user_id" class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
+                    {% for u in users %}<option value="{{ u.id }}">{{ u.username }} ({{ u.first_name }})</option>{% endfor %}
+                </select>
+                <select name="def_id" class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
+                    <option value="1">Песочный замок (1)</option>
+                    <option value="2">Пляжный зонт (2)</option>
+                    <option value="3">Шезлонг (3)</option>
+                    <option value="4">Спасательный круг (4)</option>
+                </select>
+                <button type="submit" class="bg-blue-600 hover:bg-blue-500 text-white font-black py-2 rounded-xl text-xs transition">Подарить</button>
+            </form>
+            {% endif %}
+        </div>
+
+        <div class="bg-gray-800 rounded-xl shadow-xl border border-gray-700 overflow-x-auto mb-10">
+            <table class="w-full text-left border-collapse min-w-[750px]">
+                <thead>
+                    <tr class="bg-gray-900 border-b border-gray-700 text-gray-400 uppercase text-[10px] md:text-xs">
+                        <th class="p-3 md:p-4">ID</th><th class="p-3 md:p-4">Пользователь / Ник</th><th class="p-3 md:p-4">Статус</th><th class="p-3 md:p-4 text-right">Действия</th>
+                    </tr>
+                </thead>
+                <tbody class="text-xs md:text-sm">
+                    {% for u in users %}
+                    <tr class="border-b border-gray-700 hover:bg-gray-750 transition">
+                        <td class="p-3 md:p-4 text-gray-500">#{{ u.id }}</td>
+                        <td class="p-3 md:p-4">
+                            <div class="font-semibold text-white flex items-center gap-2">
+                                 {{ u.first_name }} {{ u.last_name or '' }}
+                                {% if u.is_admin %}<span class="admin-badge">Admin</span>{% endif %}
+                                {% if u.is_moderator %}<span class="mod-badge">Moderator</span>{% endif %}
+                                {% if u.banned_until %}<span class="bg-red-950 border border-red-700 text-red-400 px-1.5 py-0.5 rounded text-[10px] font-bold">Banned</span>{% endif %}
+                            </div>
+                            <div class="text-[10px] md:text-xs text-blue-400 flex items-center gap-2">
+                                <span>@{{ u.username }}</span><span class="text-blue-400 font-mono font-bold flex items-center gap-0.5">{{ u.lightnings or 0 }}<img src="/molniya.png" class="w-4 h-4 inline-block"></span>
+                            </div>
+                        </td>
+                        <td class="p-3 md:p-4 text-gray-400">
+                            {% if u.id in connected %} <span class="text-blue-500 font-bold">В сети</span> 
+                            {% else %} Был(а) {{ format_last_seen(u.last_seen) }}{% endif %}
+                        </td>
+                        <td class="p-3 md:p-4 text-right space-x-1 md:space-x-2">
+                            <button @click="openHistory({{ u.id }}, '{{ u.first_name }} {{ u.last_name or '' }}')" class="inline-block bg-indigo-900/50 hover:bg-indigo-800 text-indigo-300 border border-indigo-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">Список общения</button>
+                            
+                            {% if can_ban_users %}
+                                {% if u.id != current_user.id and not u.is_admin %}
+                                    <button @click="openBanModal({{ u.id }}, '{{ u.first_name }} {{ u.last_name or '' }}', '{{ 'forever' if u.banned_until and u.banned_until.year >= 9999 else (u.banned_until.strftime('%Y-%m-%dT%H:%M') if u.banned_until else '') }}')" class="inline-block bg-red-900/50 hover:bg-red-800 text-red-300 border border-red-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">
+                                        {{ 'Разблокировать' if u.banned_until else 'Блокировка' }}
+                                    </button>
+                                {% endif %}
+                             {% endif %}
+
+                            {% if has_admin_priv %}
+                                {% if u.id != current_user.id %}
+                                    <button @click="openPerms({ id: {{ u.id }}, is_admin: {{ 'true' if u.is_admin else 'false' }}, is_moderator: {{ 'true' if u.is_moderator else 'false' }}, perm_edit_history: {{ 'true' if u.perm_edit_history else 'false' }}, perm_deleted_messages: {{ 'true' if u.perm_deleted_messages else 'false' }}, perm_see_chatting_with: {{ 'true' if u.perm_see_chatting_with else 'false' }}, perm_ban_users: {{ 'true' if u.perm_ban_users else 'false' }}, perm_grant_gifts: {{ 'true' if u.perm_grant_gifts else 'false' }}, perm_grant_lightnings: {{ 'true' if u.perm_grant_lightnings else 'false' }} })" class="inline-block bg-green-900/50 hover:bg-green-800 text-green-300 border border-green-700 px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition">Управление правами</button>
+                                    {% if current_user.promoted_by_id != u.id %}
+                                         <a href="{{ url_for('impersonate', target_id=u.id) }}" class="inline-block bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 md:px-3 md:py-1.5 rounded text-[10px] md:text-xs transition shadow">Войти как</a>
+                                    {% endif %}
+                                {% else %}<span class="text-gray-600 text-[10px] md:text-xs italic">Это вы</span>{% endif %}
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                 </tbody>
+             </table>
+        </div>
+
+        <div x-show="showPermsModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="showPermsModal = false">
+            <div class="bg-[#1e293b] p-6 rounded-2xl border border-gray-700 w-full max-w-sm shadow-2xl">
+                <h3 class="text-white font-bold text-lg mb-4 border-b border-gray-700 pb-2">Права пользователя</h3>
+                <div class="space-y-2.5 mb-6 max-h-60 overflow-y-auto pr-1">
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.is_admin" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-red-400">sudo admin</span></label>
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.is_moderator" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-green-400">sudo moderate</span></label>
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.perm_ban_users" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-purple-400">sudo блокировка</span></label>
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.perm_grant_gifts" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-pink-400">sudo выдача подарков</span></label>
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.perm_grant_lightnings" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-yellow-400">sudo выдача молний</span></label>
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.perm_edit_history" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-gray-300">sudo история изменений</span></label>
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.perm_deleted_messages" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-gray-300">sudo удаленные сообщения</span></label>
+                    <label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" x-model="permsUser.perm_see_chatting_with" class="w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded"><span class="text-sm font-medium text-gray-300">sudo с кем общается</span></label>
+                </div>
+                <div class="flex gap-2">
+                    <button @click="savePerms()" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 rounded-xl transition text-sm">Сохранить</button>
+                    <button @click="showPermsModal = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-bold py-2.5 rounded-xl transition text-sm">Отмена</button>
+                </div>
+            </div>
+         </div>
+
+        <div x-show="showBanModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="showBanModal = false">
+            <div class="bg-[#1e293b] p-6 rounded-xl border border-red-700 w-full max-w-sm shadow-2xl">
+                <h3 class="text-red-400 font-bold text-lg mb-4 border-b border-gray-700 pb-2">Блокировка: <span class="text-white" x-text="banTargetName"></span></h3>
+                <div class="space-y-4 mb-6">
+                    <div>
+                        <label class="flex items-center gap-2 cursor-pointer mb-2"><input type="radio" name="bmode" value="forever" x-model="banMode" class="text-red-600 bg-gray-700 border-gray-600"><span class="text-sm text-white font-semibold">Вечная блокировка</span></label>
+                        <label class="flex items-center gap-2 cursor-pointer"><input type="radio" name="bmode" value="temporary" x-model="banMode" class="text-red-600 bg-gray-700 border-gray-600"><span class="text-sm text-white font-semibold">Свое время блокировки</span></label>
+                    </div>
+                    <div x-show="banMode === 'temporary'" class="pt-2">
+                        <label class="text-xs text-gray-400 block mb-1">Разблокировать в (МСК):</label>
+                        <input type="datetime-local" x-model="banCustomDate" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-white text-sm focus:ring-1 focus:ring-red-500">
+                    </div>
+                </div>
+                <div class="flex flex-col gap-2">
+                    <div class="flex gap-2">
+                        <button @click="executeBan()" class="flex-1 bg-red-600 hover:bg-red-500 text-white font-bold py-2 rounded transition">Применить</button>
+                        <button @click="showBanModal = false" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 rounded transition">Отмена</button>
+                    </div>
+                    <button @click="executeUnban()" class="w-full bg-green-700/60 hover:bg-green-700 text-green-200 font-bold py-1.5 rounded text-xs transition mt-2">Снять блокировку</button>
+                </div>
+             </div>
+        </div>
+
+        <div x-show="showHistoryModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="showHistoryModal = false">
+            <div class="bg-[#1e293b] p-6 rounded-xl border border-gray-700 w-full max-w-lg shadow-2xl flex flex-col max-h-[80vh]">
+                <h3 class="text-white font-bold text-lg mb-4 border-b border-gray-700 pb-2">Общение за 24ч: <span class="text-blue-400" x-text="historyUserName"></span></h3>
+                <div class="flex-1 overflow-y-auto mb-4">
+                    <template x-if="historyData.length === 0"><div class="text-gray-500 text-sm italic text-center py-4">Нет активности за последние сутки.</div></template>
+                    <div class="space-y-2">
+                         <template x-for="item in historyData" :key="item.username">
+                            <div class="bg-gray-800 p-3 rounded border border-gray-700 flex justify-between items-center">
+                                <div><div class="text-sm font-bold text-white" x-text="item.name"></div><div class="text-xs text-blue-400" x-text="'@' + item.username"></div></div>
+                                <div class="text-xs font-mono text-gray-400 bg-gray-900 px-2 py-1 rounded" x-text="item.time_range"></div>
+                             </div>
+                        </template>
+                     </div>
+                </div>
+                <button @click="showHistoryModal = false" class="w-full bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 rounded transition">Закрыть</button>
+             </div>
+        </div>
+
+    </div>
+
+    <script>
+        function adminApp() {
+             return {
+                showPermsModal: false,
+                permsUser: {},
+                showHistoryModal: false,
+                historyUserName: '',
+                historyData: [],
+
+                showBanModal: false,
+                banTargetId: null,
+                banTargetName: '',
+                banMode: 'temporary',
+                banCustomDate: '',
+
+                openPerms(userData) { this.permsUser = userData; this.showPermsModal = true; },
+                async savePerms() {
+                    await fetch('/api/admin/permissions/' + this.permsUser.id, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(this.permsUser)
+                    });
+                    location.reload();
+                },
+                async openHistory(userId, userName) {
+                    this.historyUserName = userName;
+                    const res = await fetch('/api/admin/history_24h/' + userId);
+                    this.historyData = await res.json();
+                    this.showHistoryModal = true;
+                },
+
+                openBanModal(id, name, currentBan) {
+                    this.banTargetId = id;
+                    this.banTargetName = name;
+                    if (currentBan === 'forever') this.banMode = 'forever';
+                    else if (currentBan !== '') { this.banMode = 'temporary'; this.banCustomDate = currentBan; }
+                    else {
+                        this.banMode = 'temporary';
+                        let tomorrow = new Date(Date.now() + 86400000);
+                        let tzoffset = tomorrow.getTimezoneOffset() * 60000;
+                        this.banCustomDate = new Date(tomorrow - tzoffset).toISOString().slice(0, 16);
+                    }
+                    this.showBanModal = true;
+                },
+                async executeBan() {
+                    await fetch('/api/admin/ban/' + this.banTargetId, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ action: 'ban', type: this.banMode, until: this.banCustomDate })
+                    });
+                    location.reload();
+                },
+                async executeUnban() {
+                    await fetch('/api/admin/ban/' + this.banTargetId, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ action: 'unban' })
+                    });
+                    location.reload();
+                }
+            }
+        }
+    </script>
+</body></html>
+"""
 
 # ==========================================
 # МАРШРУТЫ И РОУТЫ КАРТИНОК
@@ -2291,69 +2269,44 @@ def get_chats():
 
     chats_data = []
     for cid in chat_ids:
-        chat = Chat.query.get(cid)
-        if not chat: continue
-        
+        partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == cid, ChatParticipant.user_id != current_user.id).first()
+        if not partner_cp: continue
+
+        partner = User.query.get(partner_cp.user_id)
         last_msg = Message.query.filter_by(chat_id=cid).order_by(Message.timestamp.desc()).first()
+
+        custom_status = None
+        if can_see_chatting() and partner.id in active_chat_views:
+            p = User.query.get(active_chat_views[partner.id])
+            if p: custom_status = f"общается с: {p.first_name} {p.last_name or ''}"
+
+        partner_banned, _, _ = check_user_banned(partner)
+
+        contact = Contact.query.filter_by(user_id=current_user.id, contact_id=partner.id, is_explicit=True).first()
+        disp_name = contact.custom_name if (contact and contact.custom_name) else f"{partner.first_name} {partner.last_name or ''}"
+
+        i_blocked = PersonalBlock.query.filter_by(blocker_id=current_user.id, blocked_id=partner.id).first() is not None
+        partner_blocked = PersonalBlock.query.filter_by(blocker_id=partner.id, blocked_id=current_user.id).first() is not None
+
+        show_ls = is_allowed_to_see(partner, partner.privacy_last_seen, current_user.id)
+        ls_str = format_last_seen_str(partner.last_seen) if show_ls else "недавно"
+
         lmsg_preview = ''
         if last_msg:
             if last_msg.voice_base64: lmsg_preview = '[Голосовое]'
             elif last_msg.text: lmsg_preview = last_msg.text
             elif last_msg.image_base64: lmsg_preview = '[Фото]'
 
-        if chat.type == 'group':
-            my_cp = ChatParticipant.query.filter_by(chat_id=cid, user_id=current_user.id).first()
-            i_am_banned = my_cp.perm_ban_users == None # Мы можем использовать удаление из ChatParticipant или флаг. Пока если в таблице - значит не забанен (исключен).
-            # В данном коде если юзер исключен, мы удаляем его из ChatParticipant. Так что i_am_banned = False.
-            
-            chats_data.append({
-                'chat_id': cid, 'is_group': True, 'partner_id': cid, 
-                'partner_name': chat.name or "Группа", 'partner_avatar': chat.avatar_url,
-                'member_count': ChatParticipant.query.filter_by(chat_id=cid).count(),
-                'custom_status': chat.description, 'last_message': lmsg_preview,
-                'last_time': last_msg.timestamp.strftime('%H:%M') if last_msg else '',
-                'is_online': False, 'partner_is_banned': False, 'i_blocked_partner': False, 'partner_blocked_me': False,
-                'perms': {
-                    'send_text': chat.global_send_text, 'send_photos': chat.global_send_photos,
-                    'send_voice': chat.global_send_voice, 'send_emoji': chat.global_send_emoji
-                },
-                'i_am_admin': my_cp.is_admin, 'i_am_owner': chat.owner_id == current_user.id,
-                'i_am_banned_in_group': False
-            })
-        else:
-            partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == cid, ChatParticipant.user_id != current_user.id).first()
-            if not partner_cp: continue
-
-            partner = User.query.get(partner_cp.user_id)
-            custom_status = None
-            if can_see_chatting() and partner.id in active_chat_views:
-                p = User.query.get(active_chat_views[partner.id])
-                if p: custom_status = f"общается с: {p.first_name} {p.last_name or ''}"
-
-            partner_banned, _, _ = check_user_banned(partner)
-            contact = Contact.query.filter_by(user_id=current_user.id, contact_id=partner.id, is_explicit=True).first()
-            disp_name = contact.custom_name if (contact and contact.custom_name) else f"{partner.first_name} {partner.last_name or ''}"
-
-            i_blocked = PersonalBlock.query.filter_by(blocker_id=current_user.id, blocked_id=partner.id).first() is not None
-            partner_blocked = PersonalBlock.query.filter_by(blocker_id=partner.id, blocked_id=current_user.id).first() is not None
-
-            show_ls = is_allowed_to_see(partner, partner.privacy_last_seen, current_user.id)
-            ls_str = format_last_seen_str(partner.last_seen) if show_ls else "недавно"
-
-            chats_data.append({
-                'chat_id': cid, 'is_group': False, 'partner_id': partner.id, 'partner_name': disp_name,
-                'partner_avatar': partner.avatar_url,
-                'contact_custom_name': contact.custom_name if contact else '',
-                'is_explicit_contact': contact is not None, 'partner_is_admin': partner.is_admin,
-                'partner_is_moderator': partner.is_moderator, 'partner_is_banned': partner_banned,
-                'i_blocked_partner': i_blocked, 'partner_blocked_me': partner_blocked,
-                'custom_status': custom_status, 'last_message': lmsg_preview,
-                'last_time': last_msg.timestamp.strftime('%H:%M') if last_msg else '',
-                'is_online': partner.id in connected_users, 'last_seen': ls_str,
-                'perms': {}
-            })
-
-    chats_data.sort(key=lambda x: x['last_time'], reverse=True)
+        chats_data.append({
+            'chat_id': cid, 'partner_id': partner.id, 'partner_name': disp_name,
+            'contact_custom_name': contact.custom_name if contact else '',
+            'is_explicit_contact': contact is not None, 'partner_is_admin': partner.is_admin,
+            'partner_is_moderator': partner.is_moderator, 'partner_is_banned': partner_banned,
+            'i_blocked_partner': i_blocked, 'partner_blocked_me': partner_blocked,
+            'custom_status': custom_status, 'last_message': lmsg_preview,
+            'last_time': last_msg.timestamp.strftime('%H:%M') if last_msg else '',
+            'is_online': partner.id in connected_users, 'last_seen': ls_str
+        })
     return jsonify(chats_data)
 
 @app.route('/api/search_users')
@@ -2381,14 +2334,9 @@ def search_users():
 def start_chat(target_id):
     my_chats = set(cp.chat_id for cp in ChatParticipant.query.filter_by(user_id=current_user.id).all())
     target_chats = set(cp.chat_id for cp in ChatParticipant.query.filter_by(user_id=target_id).all())
-    
-    common = None
-    for cid in my_chats.intersection(target_chats):
-        c = Chat.query.get(cid)
-        if c and c.type == 'private':
-            common = cid; break
+    common = my_chats.intersection(target_chats)
 
-    if common: chat_id = common
+    if common: chat_id = list(common)[0]
     else:
         new_chat = Chat(type='private')
         db.session.add(new_chat)
@@ -2403,169 +2351,6 @@ def start_chat(target_id):
         db.session.commit()
     return jsonify({'chat_id': chat_id})
 
-# ==========================================
-# ГРУППОВЫЕ МАРШРУТЫ
-# ==========================================
-@app.route('/api/chat/group/create', methods=['POST'])
-@login_required
-def create_group():
-    name = request.json.get('name', 'Новая группа')
-    new_chat = Chat(type='group', name=name, owner_id=current_user.id)
-    db.session.add(new_chat)
-    db.session.commit()
-    cp = ChatParticipant(chat_id=new_chat.id, user_id=current_user.id, is_admin=True, role_tag='Владелец')
-    db.session.add(cp)
-    db.session.commit()
-    return jsonify({'chat_id': new_chat.id})
-
-@app.route('/api/chat/group/<int:chat_id>/info', methods=['GET'])
-@login_required
-def get_group_info(chat_id):
-    chat = Chat.query.get_or_404(chat_id)
-    if chat.type != 'group': return abort(400)
-    my_cp = ChatParticipant.query.filter_by(chat_id=chat_id, user_id=current_user.id).first()
-    if not my_cp: return abort(403)
-
-    participants = ChatParticipant.query.filter_by(chat_id=chat_id).all()
-    members = []
-    for p in participants:
-        u = User.query.get(p.user_id)
-        members.append({
-            'user_id': u.id, 'name': f"{u.first_name} {u.last_name or ''}", 'username': u.username,
-            'avatar': u.avatar_url, 'is_admin': p.is_admin, 'is_owner': chat.owner_id == u.id,
-            'role_tag': p.role_tag, 'perm_change_profile': p.perm_change_profile,
-            'perm_delete_msgs': p.perm_delete_msgs, 'perm_ban_users': p.perm_ban_users,
-            'perm_change_tags': p.perm_change_tags, 'perm_assign_admins': p.perm_assign_admins
-        })
-
-    return jsonify({
-        'chat_id': chat.id, 'name': chat.name, 'avatar_url': chat.avatar_url, 'description': chat.description,
-        'owner_id': chat.owner_id, 'i_am_owner': chat.owner_id == current_user.id, 'i_am_admin': my_cp.is_admin,
-        'perms': {
-            'send_text': chat.global_send_text, 'send_photos': chat.global_send_photos,
-            'send_voice': chat.global_send_voice, 'send_emoji': chat.global_send_emoji,
-            'add_members': chat.global_add_members, 'change_profile': chat.global_change_profile
-        },
-        'my_perms': {
-            'change_profile': my_cp.perm_change_profile, 'delete_msgs': my_cp.perm_delete_msgs,
-            'ban_users': my_cp.perm_ban_users, 'change_tags': my_cp.perm_change_tags, 'assign_admins': my_cp.perm_assign_admins
-        },
-        'members': members
-    })
-
-@app.route('/api/chat/group/<int:chat_id>/update', methods=['POST'])
-@login_required
-def update_group_profile(chat_id):
-    chat = Chat.query.get_or_404(chat_id)
-    my_cp = ChatParticipant.query.filter_by(chat_id=chat_id, user_id=current_user.id).first()
-    if not (chat.owner_id == current_user.id or (my_cp and my_cp.is_admin and my_cp.perm_change_profile) or chat.global_change_profile):
-        return abort(403)
-    
-    data = request.json
-    chat.name = data.get('name', chat.name)
-    chat.description = data.get('description', chat.description)
-    if 'avatar_url' in data: chat.avatar_url = data['avatar_url']
-    db.session.commit()
-    return jsonify({'success': True})
-
-@app.route('/api/chat/group/<int:chat_id>/update_perms', methods=['POST'])
-@login_required
-def update_group_perms(chat_id):
-    chat = Chat.query.get_or_404(chat_id)
-    my_cp = ChatParticipant.query.filter_by(chat_id=chat_id, user_id=current_user.id).first()
-    if not (chat.owner_id == current_user.id or (my_cp and my_cp.is_admin)): return abort(403)
-    
-    data = request.json
-    chat.global_send_text = data.get('send_text', chat.global_send_text)
-    chat.global_send_photos = data.get('send_photos', chat.global_send_photos)
-    chat.global_send_voice = data.get('send_voice', chat.global_send_voice)
-    chat.global_send_emoji = data.get('send_emoji', chat.global_send_emoji)
-    chat.global_add_members = data.get('add_members', chat.global_add_members)
-    chat.global_change_profile = data.get('change_profile', chat.global_change_profile)
-    db.session.commit()
-    return jsonify({'success': True})
-
-@app.route('/api/chat/group/<int:chat_id>/add_member', methods=['POST'])
-@login_required
-def group_add_member(chat_id):
-    chat = Chat.query.get_or_404(chat_id)
-    my_cp = ChatParticipant.query.filter_by(chat_id=chat_id, user_id=current_user.id).first()
-    if not (chat.owner_id == current_user.id or my_cp.is_admin or chat.global_add_members): return jsonify({'success': False, 'error': 'Нет прав'})
-    
-    username = request.json.get('username')
-    u = User.query.filter_by(username=username).first()
-    if not u: return jsonify({'success': False, 'error': 'Пользователь не найден'})
-    if ChatParticipant.query.filter_by(chat_id=chat_id, user_id=u.id).first(): return jsonify({'success': False, 'error': 'Уже в группе'})
-    
-    db.session.add(ChatParticipant(chat_id=chat_id, user_id=u.id))
-    db.session.commit()
-    socketio.emit('block_status_changed', {'chat_id': chat_id}, room=f"user_{u.id}", namespace='/')
-    return jsonify({'success': True})
-
-@app.route('/api/chat/group/<int:chat_id>/kick', methods=['POST'])
-@login_required
-def group_kick_member(chat_id):
-    chat = Chat.query.get_or_404(chat_id)
-    my_cp = ChatParticipant.query.filter_by(chat_id=chat_id, user_id=current_user.id).first()
-    target_id = request.json.get('target_id')
-    
-    if chat.owner_id == target_id: return jsonify({'success': False}) # Владельца кикнуть нельзя
-    if not (chat.owner_id == current_user.id or (my_cp and my_cp.is_admin and my_cp.perm_ban_users)): return jsonify({'success': False})
-
-    target_cp = ChatParticipant.query.filter_by(chat_id=chat_id, user_id=target_id).first()
-    if target_cp: 
-        db.session.delete(target_cp)
-        db.session.commit()
-        socketio.emit('block_status_changed', {'chat_id': chat_id}, room=f"user_{target_id}", namespace='/')
-    return jsonify({'success': True})
-
-@app.route('/api/chat/group/<int:chat_id>/leave', methods=['POST'])
-@login_required
-def group_leave(chat_id):
-    chat = Chat.query.get_or_404(chat_id)
-    my_cp = ChatParticipant.query.filter_by(chat_id=chat_id, user_id=current_user.id).first()
-    if my_cp:
-        if chat.owner_id == current_user.id:
-            db.session.delete(chat) # Если выходит создатель - удаляем чат для всех (упрощенно)
-        else:
-            db.session.delete(my_cp)
-        db.session.commit()
-    return jsonify({'success': True})
-
-@app.route('/api/chat/group/<int:chat_id>/admin', methods=['POST'])
-@login_required
-def group_admin_manage(chat_id):
-    chat = Chat.query.get_or_404(chat_id)
-    my_cp = ChatParticipant.query.filter_by(chat_id=chat_id, user_id=current_user.id).first()
-    data = request.json
-    target_id = data.get('user_id')
-
-    if chat.owner_id == target_id: return jsonify({'success': False})
-    
-    target_cp = ChatParticipant.query.filter_by(chat_id=chat_id, user_id=target_id).first()
-    if not target_cp: return jsonify({'success': False})
-
-    i_am_owner = chat.owner_id == current_user.id
-
-    if i_am_owner or (my_cp.is_admin and my_cp.perm_change_tags):
-        target_cp.role_tag = data.get('role_tag')
-
-    if i_am_owner or (my_cp.is_admin and my_cp.perm_assign_admins):
-        target_cp.is_admin = data.get('is_admin', False)
-        if target_cp.is_admin:
-            target_cp.perm_change_profile = data.get('perm_change_profile') if (i_am_owner or my_cp.perm_change_profile) else False
-            target_cp.perm_delete_msgs = data.get('perm_delete_msgs') if (i_am_owner or my_cp.perm_delete_msgs) else False
-            target_cp.perm_ban_users = data.get('perm_ban_users') if (i_am_owner or my_cp.perm_ban_users) else False
-            target_cp.perm_change_tags = data.get('perm_change_tags') if (i_am_owner or my_cp.perm_change_tags) else False
-            target_cp.perm_assign_admins = data.get('perm_assign_admins') if i_am_owner else False
-        else:
-            target_cp.perm_change_profile = False; target_cp.perm_delete_msgs = False; target_cp.perm_ban_users = False
-            target_cp.perm_change_tags = False; target_cp.perm_assign_admins = False
-
-    db.session.commit()
-    return jsonify({'success': True})
-
-
 @app.route('/api/chat/<int:chat_id>/messages')
 @login_required
 def get_messages(chat_id):
@@ -2579,18 +2364,8 @@ def get_messages(chat_id):
     if can_see_deleted(): messages = Message.query.filter_by(chat_id=chat_id).order_by(Message.timestamp.asc()).all()
     else: messages = Message.query.filter_by(chat_id=chat_id, is_deleted=False).order_by(Message.timestamp.asc()).all()
 
-    chat = Chat.query.get(chat_id)
-    
     result = []
     see_edits = can_see_edits()
-    
-    # Кэш пользователей для групп
-    user_cache = {}
-    if chat.type == 'group':
-        for p in ChatParticipant.query.filter_by(chat_id=chat_id).all():
-            u = User.query.get(p.user_id)
-            if u: user_cache[p.user_id] = {'name': f"{u.first_name} {u.last_name or ''}", 'tag': p.role_tag, 'is_admin': p.is_admin, 'is_owner': chat.owner_id == p.user_id}
-
     for m in messages:
         reply_text = ""
         if m.reply_to_id:
@@ -2605,14 +2380,8 @@ def get_messages(chat_id):
             fu = User.query.get(m.forwarded_from_id)
             if fu: fwd_name = f"{fu.first_name} {fu.last_name or ''}"
 
-        sender_info = user_cache.get(m.sender_id, {}) if chat.type == 'group' else {}
-
         result.append({
             'id': m.id, 'sender_id': m.sender_id, 'text': m.text,
-            'sender_name': sender_info.get('name', 'Неизвестный'),
-            'sender_tag': sender_info.get('tag', ''),
-            'sender_is_admin': sender_info.get('is_admin', False),
-            'sender_is_owner': sender_info.get('is_owner', False),
             'image_base64': m.image_base64, 'voice_base64': m.voice_base64,
             'time': m.timestamp.strftime('%H:%M'),
             'is_read': m.is_read, 'is_deleted': m.is_deleted, 'is_edited': m.is_edited,
@@ -2649,6 +2418,7 @@ def admin_grant_lightnings():
         flash(f"Начислено {amt} молний пользователю {u.username}", 'success')
     return redirect(url_for('admin_panel'))
 
+# НОВОЕ: Списание молний в Админке
 @app.route('/admin/deduct_lightnings', methods=['POST'])
 @login_required
 def admin_deduct_lightnings():
@@ -2802,6 +2572,7 @@ def handle_connect():
         db.session.commit()
         broadcast_user_status(uid)
 
+# НОВОЕ: Задержка офлайн-статуса на 7 секунд для плохого интернета!
 @socketio.on('disconnect')
 def handle_disconnect():
     if current_user.is_authenticated:
@@ -2809,7 +2580,8 @@ def handle_disconnect():
         disc_sid = request.sid
 
         def delayed_offline_check(check_uid, check_sid):
-            socketio.sleep(7.0) 
+            socketio.sleep(7.0) # Ждём ровно 7 секунд!
+            # Если через 7 секунд SID юзера всё ещё старый (значит он не переподключился)
             if connected_users.get(check_uid) == check_sid:
                 del connected_users[check_uid]
                 if check_uid in active_chat_views:
@@ -2837,14 +2609,8 @@ def handle_close_chat():
 @socketio.on('typing')
 def handle_typing(data):
     chat_id = data.get('chat_id')
-    chat = Chat.query.get(chat_id)
-    if chat and chat.type == 'group':
-        for p in ChatParticipant.query.filter_by(chat_id=chat_id).all():
-            if p.user_id != current_user.id:
-                emit('typing_status', {'chat_id': chat_id, 'is_typing': True}, room=f"user_{p.user_id}")
-    else:
-        partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == chat_id, ChatParticipant.user_id != current_user.id).first()
-        if partner_cp: emit('typing_status', {'chat_id': chat_id, 'is_typing': True}, room=f"user_{partner_cp.user_id}")
+    partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == chat_id, ChatParticipant.user_id != current_user.id).first()
+    if partner_cp: emit('typing_status', {'chat_id': chat_id, 'is_typing': True}, room=f"user_{partner_cp.user_id}")
 
 @socketio.on('send_message')
 def handle_message(data):
@@ -2854,24 +2620,12 @@ def handle_message(data):
     text = data.get('text', '')
     img = data.get('image_base64')
     voice = data.get('voice_base64')
-    client_temp_id = data.get('client_temp_id')
-
-    chat = Chat.query.get(chat_id)
-    if not chat: return
-
-    if chat.type == 'private':
-        partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == chat_id, ChatParticipant.user_id != current_user.id).first()
-        if partner_cp:
-            block1 = PersonalBlock.query.filter_by(blocker_id=current_user.id, blocked_id=partner_cp.user_id).first()
-            block2 = PersonalBlock.query.filter_by(blocker_id=partner_cp.user_id, blocked_id=current_user.id).first()
-            if block1 or block2: return 
-    else:
-        my_cp = ChatParticipant.query.filter_by(chat_id=chat_id, user_id=current_user.id).first()
-        if not my_cp: return # Выгнали из группы
-        if not (my_cp.is_admin or chat.owner_id == current_user.id):
-            if text and not chat.global_send_text and not voice and not img: return
-            if img and not chat.global_send_photos: return
-            if voice and not chat.global_send_voice: return
+    client_temp_id = data.get('client_temp_id') # Принимаем временный ID из очереди!
+    partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == chat_id, ChatParticipant.user_id != current_user.id).first()
+    if partner_cp:
+        block1 = PersonalBlock.query.filter_by(blocker_id=current_user.id, blocked_id=partner_cp.user_id).first()
+        block2 = PersonalBlock.query.filter_by(blocker_id=partner_cp.user_id, blocked_id=current_user.id).first()
+        if block1 or block2: return 
 
     msg = Message(
         chat_id=chat_id, sender_id=current_user.id, 
@@ -2897,28 +2651,14 @@ def handle_message(data):
         fu = User.query.get(forwarded_from_id)
         if fu: fwd_name = f"{fu.first_name} {fu.last_name or ''}"
 
-    sender_name = current_user.first_name
-    sender_tag = ""
-    sender_is_admin = False
-    sender_is_owner = False
-
-    if chat.type == 'group':
-        my_cp = ChatParticipant.query.filter_by(chat_id=chat_id, user_id=current_user.id).first()
-        if my_cp:
-            sender_tag = my_cp.role_tag
-            sender_is_admin = my_cp.is_admin
-            sender_is_owner = chat.owner_id == current_user.id
-
     msg_data = {
         'id': msg.id, 'chat_id': chat_id, 'sender_id': current_user.id,
-        'client_temp_id': client_temp_id, 
+        'client_temp_id': client_temp_id, # Возвращаем клиенту его ID для снятия часиков ⏳!
         'text': msg.text, 'image_base64': msg.image_base64, 'voice_base64': msg.voice_base64,
         'time': msg.timestamp.strftime('%H:%M'), 'is_read': False,
         'is_deleted': False, 'is_edited': False, 'original_text': None,
         'reply_to_id': reply_to_id, 'reply_text': reply_text,
-        'forwarded_from_id': forwarded_from_id, 'forwarded_from_name': fwd_name,
-        'sender_name': sender_name, 'sender_tag': sender_tag, 
-        'sender_is_admin': sender_is_admin, 'sender_is_owner': sender_is_owner
+        'forwarded_from_id': forwarded_from_id, 'forwarded_from_name': fwd_name
     }
     for p in ChatParticipant.query.filter_by(chat_id=chat_id).all():
         emit('new_message', msg_data, room=f"user_{p.user_id}")
@@ -2938,19 +2678,7 @@ def handle_edit_message(data):
 def handle_delete_message(data):
     msg_id = data.get('message_id')
     msg = Message.query.get(msg_id)
-    if not msg: return
-
-    can_delete = False
-    if msg.sender_id == current_user.id or has_admin_priv(): 
-        can_delete = True
-    else:
-        chat = Chat.query.get(msg.chat_id)
-        if chat and chat.type == 'group':
-            my_cp = ChatParticipant.query.filter_by(chat_id=chat.id, user_id=current_user.id).first()
-            if my_cp and (chat.owner_id == current_user.id or (my_cp.is_admin and my_cp.perm_delete_msgs)):
-                can_delete = True
-
-    if can_delete:
+    if msg and (msg.sender_id == current_user.id or has_admin_priv()):
         msg.is_deleted = True; db.session.commit()
         for p in ChatParticipant.query.filter_by(chat_id=msg.chat_id).all():
             emit('message_updated', {'chat_id': msg.chat_id}, room=f"user_{p.user_id}")
@@ -2986,26 +2714,6 @@ def init_db():
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS q3_claimed BOOLEAN DEFAULT FALSE;"))
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS perm_grant_gifts BOOLEAN DEFAULT FALSE;"))
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS perm_grant_lightnings BOOLEAN DEFAULT FALSE;"))
-
-            # Апгрейд для Групповых чатов
-            db.session.execute(text("ALTER TABLE chats ADD COLUMN IF NOT EXISTS name VARCHAR(100);"))
-            db.session.execute(text("ALTER TABLE chats ADD COLUMN IF NOT EXISTS avatar_url TEXT;"))
-            db.session.execute(text("ALTER TABLE chats ADD COLUMN IF NOT EXISTS description TEXT;"))
-            db.session.execute(text("ALTER TABLE chats ADD COLUMN IF NOT EXISTS owner_id INTEGER;"))
-            db.session.execute(text("ALTER TABLE chats ADD COLUMN IF NOT EXISTS global_send_text BOOLEAN DEFAULT TRUE;"))
-            db.session.execute(text("ALTER TABLE chats ADD COLUMN IF NOT EXISTS global_send_photos BOOLEAN DEFAULT TRUE;"))
-            db.session.execute(text("ALTER TABLE chats ADD COLUMN IF NOT EXISTS global_send_voice BOOLEAN DEFAULT TRUE;"))
-            db.session.execute(text("ALTER TABLE chats ADD COLUMN IF NOT EXISTS global_send_emoji BOOLEAN DEFAULT TRUE;"))
-            db.session.execute(text("ALTER TABLE chats ADD COLUMN IF NOT EXISTS global_add_members BOOLEAN DEFAULT TRUE;"))
-            db.session.execute(text("ALTER TABLE chats ADD COLUMN IF NOT EXISTS global_change_profile BOOLEAN DEFAULT FALSE;"))
-
-            db.session.execute(text("ALTER TABLE chat_participants ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE;"))
-            db.session.execute(text("ALTER TABLE chat_participants ADD COLUMN IF NOT EXISTS role_tag VARCHAR(50);"))
-            db.session.execute(text("ALTER TABLE chat_participants ADD COLUMN IF NOT EXISTS perm_change_profile BOOLEAN DEFAULT FALSE;"))
-            db.session.execute(text("ALTER TABLE chat_participants ADD COLUMN IF NOT EXISTS perm_delete_msgs BOOLEAN DEFAULT FALSE;"))
-            db.session.execute(text("ALTER TABLE chat_participants ADD COLUMN IF NOT EXISTS perm_ban_users BOOLEAN DEFAULT FALSE;"))
-            db.session.execute(text("ALTER TABLE chat_participants ADD COLUMN IF NOT EXISTS perm_change_tags BOOLEAN DEFAULT FALSE;"))
-            db.session.execute(text("ALTER TABLE chat_participants ADD COLUMN IF NOT EXISTS perm_assign_admins BOOLEAN DEFAULT FALSE;"))
 
             db.session.execute(text("ALTER TABLE users ALTER COLUMN last_name DROP NOT NULL;"))
             db.session.commit()
