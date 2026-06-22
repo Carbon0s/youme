@@ -2010,7 +2010,7 @@ def my_profile():
         current_user.last_name = data.get('last_name') or None
         current_user.phone = data.get('phone')
         current_user.about_me = data.get('about_me')
-         if data.get('avatar'): current_user.avatar_url = data.get('avatar')
+        if data.get('avatar'): current_user.avatar_url = data.get('avatar')
 
         b_day = data.get('birth_day')
         b_month = data.get('birth_month')
