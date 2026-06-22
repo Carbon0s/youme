@@ -135,8 +135,8 @@ class User(UserMixin, db.Model):
     perm_deleted_messages = db.Column(db.Boolean, default=False)
     perm_see_chatting_with = db.Column(db.Boolean, default=False)
     perm_ban_users = db.Column(db.Boolean, default=False)
-    perm_grant_gifts = db.Column(db.Boolean, default=False)      # Sudo подарки
-    perm_grant_lightnings = db.Column(db.Boolean, default=False) # Sudo молнии
+    perm_grant_gifts = db.Column(db.Boolean, default=False)      
+    perm_grant_lightnings = db.Column(db.Boolean, default=False) 
 
     banned_until = db.Column(db.DateTime, nullable=True)
     lightnings = db.Column(db.Integer, default=0)
@@ -370,7 +370,7 @@ LOGIN_TEMPLATE = BASE_HTML_HEAD + """
                     <input type="text" name="first_name" placeholder="Имя" required class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
                     <input type="text" name="last_name" placeholder="Фамилия (необязательно)" class="w-full bg-gray-700 border border-gray-600 rounded p-3 md:p-2 text-white focus:outline-none focus:border-blue-500">
                 </div>
-                <button type="submit" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 md:py-2 rounded transition">Зарегистрироваться</button>
+                <button type="submit" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 md:py-2 rounded transition">Зарегистрироваться</button>
                 <p class="text-center text-sm text-gray-400 mt-4">Уже есть аккаунт? <a href="#" @click.prevent="isLogin = true" class="text-blue-400 hover:underline">Войти</a></p>
             </form>
         </div>
@@ -394,8 +394,8 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 </div>
 
                 <div class="flex items-center gap-2">
-                    <div @click="openQuestsModal()" class="flex items-center gap-1 bg-green-500/15 hover:bg-green-500/25 border border-green-500/40 px-3 py-1 rounded-full cursor-pointer transition shadow-sm" title="Ежедневные задания">
-                        <span class="text-green-400 text-sm">⚡</span>
+                    <div @click="openQuestsModal()" class="flex items-center gap-1.5 bg-blue-500/15 hover:bg-blue-500/25 border border-blue-500/40 px-3 py-1 rounded-full cursor-pointer transition shadow-sm" title="Ежедневные задания">
+                        <img src="/molniya.png" class="w-3.5 h-3.5 object-contain" alt="⚡">
                         <span class="text-white font-mono font-bold text-xs md:text-sm" x-text="myLightnings"></span>
                     </div>
 
@@ -569,9 +569,18 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                         <template x-if="msg.is_deleted">
                                             <span class="text-[9px] font-bold text-red-400 mr-1">(удалено)</span>
                                         </template>
+                                        
                                         <span x-text="msg.time"></span>
+
                                         <template x-if="msg.sender_id === myId && !msg.is_deleted">
-                                            <span class="font-bold text-[11px]" :class="msg.is_read ? 'text-[#4da3ff]' : 'text-blue-200'" x-text="msg.is_read ? '✓✓' : '✓'"></span>
+                                            <span class="font-bold text-[11px] ml-0.5">
+                                                <template x-if="msg.is_pending">
+                                                    <span class="text-yellow-300 animate-pulse" title="Отправка...">⏳</span>
+                                                </template>
+                                                <template x-if="!msg.is_pending">
+                                                    <span :class="msg.is_read ? 'text-[#4da3ff]' : 'text-blue-200'" x-text="msg.is_read ? '✓✓' : '✓'"></span>
+                                                </template>
+                                            </span>
                                         </template>
                                     </div>
                                 </div>
@@ -716,12 +725,12 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
                         <div class="flex justify-center items-center gap-2.5 mt-5 px-4">
                             <template x-for="slotIdx in [0, 1, 2, 3]" :key="slotIdx">
-                                <div @click="handleGiftSlotClick(slotIdx)" class="w-13 h-13 md:w-14 md:h-14 rounded-2xl bg-black/40 border border-white/10 flex items-center justify-center relative cursor-pointer hover:border-green-500 transition group shadow-inner">
+                                <div @click="handleGiftSlotClick(slotIdx)" class="w-13 h-13 md:w-14 md:h-14 rounded-2xl bg-black/40 border border-white/10 flex items-center justify-center relative cursor-pointer hover:border-blue-500 transition group shadow-inner">
                                     <template x-if="getPinnedGiftAt(slotIdx)">
                                         <img :src="getPinnedGiftAt(slotIdx).img" class="w-9 h-9 md:w-10 md:h-10 object-contain filter drop-shadow">
                                     </template>
                                     <template x-if="!getPinnedGiftAt(slotIdx) && isMyProfile">
-                                        <span class="text-white/20 text-2xl group-hover:text-green-400 font-extralight">+</span>
+                                        <span class="text-white/20 text-2xl group-hover:text-blue-400 font-extralight">+</span>
                                     </template>
                                 </div>
                             </template>
@@ -756,12 +765,12 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         </template>
 
                         <div class="pt-2">
-                            <button @click="openGiftsShop()" class="w-full bg-gradient-to-r from-green-950/40 to-emerald-950/40 hover:from-green-900/50 hover:to-emerald-900/50 border border-green-800/50 text-green-300 p-3 rounded-xl font-bold flex items-center justify-between transition shadow-sm mb-3">
+                            <button @click="openGiftsShop()" class="w-full bg-blue-950/40 hover:bg-blue-900/50 border border-blue-800/50 text-blue-300 p-3 rounded-xl font-bold flex items-center justify-between transition shadow-sm mb-3">
                                 <div class="flex items-center gap-2.5">
-                                    <span class="text-green-400 text-lg">🎁</span>
+                                    <span class="text-blue-400 text-lg">🎁</span>
                                     <span class="text-sm">Подарки</span>
                                 </div>
-                                <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+                                <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
                             </button>
 
                             <template x-if="isMyProfile">
@@ -888,10 +897,10 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
         </div>
 
         <div x-show="showQuestsModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" @click.self="showQuestsModal = false">
-            <div class="bg-[#1e293b] p-6 rounded-2xl border border-green-500/40 w-full max-w-md shadow-2xl text-white max-h-[85vh] overflow-y-auto">
+            <div class="bg-[#1e293b] p-6 rounded-2xl border border-blue-500/40 w-full max-w-md shadow-2xl text-white max-h-[85vh] overflow-y-auto">
                 <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-3">
                     <div class="flex items-center gap-2">
-                        <span class="text-2xl">⚡</span>
+                        <img src="/molniya.png" class="w-6 h-6 object-contain" alt="⚡">
                         <h3 class="font-bold text-lg">Ежедневные задания</h3>
                     </div>
                     <button @click="showQuestsModal = false" class="text-gray-400 hover:text-white font-bold text-lg">✕</button>
@@ -904,14 +913,14 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             <div class="flex-1 min-w-0">
                                 <div class="text-sm font-bold text-white truncate" x-text="q.name"></div>
                                 <div class="text-xs text-gray-400 mt-0.5">
-                                    Прогресс: <span class="text-green-400 font-mono font-bold" x-text="q.progress + '/' + q.target"></span>
+                                    Прогресс: <span class="text-blue-400 font-mono font-bold" x-text="q.progress + '/' + q.target"></span>
                                 </div>
                             </div>
                             <button @click="executeClaimQuest(key)" :disabled="q.claimed || q.progress < q.target"
-                                    :class="q.claimed ? 'bg-gray-900 text-gray-600 border border-gray-800 cursor-not-allowed' : (q.progress >= q.target ? 'bg-green-600 hover:bg-green-500 text-black shadow-lg hover:scale-105' : 'bg-gray-700 text-gray-400 cursor-not-allowed')"
-                                    class="px-3.5 py-2 rounded-xl font-black text-xs transition flex items-center gap-1 flex-shrink-0">
+                                    :class="q.claimed ? 'bg-gray-900 text-gray-600 border border-gray-800 cursor-not-allowed' : (q.progress >= q.target ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg hover:scale-105' : 'bg-gray-700 text-gray-400 cursor-not-allowed')"
+                                    class="px-3.5 py-2 rounded-xl font-black text-xs transition flex items-center justify-center gap-1 flex-shrink-0 min-w-[70px]">
                                 <span x-text="q.claimed ? 'Забрано' : ('+' + q.reward)"></span>
-                                <template x-if="!q.claimed"><span class="text-xs">⚡</span></template>
+                                <template x-if="!q.claimed"><img src="/molniya.png" class="w-3 h-3 inline-block align-middle"></template>
                             </button>
                         </div>
                     </template>
@@ -920,15 +929,15 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
         </div>
 
         <div x-show="showShopModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" @click.self="showShopModal = false">
-            <div class="bg-[#1e293b] p-6 rounded-2xl border border-gray-700 w-full max-w-lg shadow-2xl text-white max-h-[90vh] flex flex-col">
+            <div class="bg-[#1e293b] p-6 rounded-2xl border border-blue-500/40 w-full max-w-lg shadow-2xl text-white max-h-[90vh] flex flex-col">
                 <div class="flex justify-between items-center mb-4 flex-shrink-0 border-b border-gray-700 pb-3">
                     <div class="flex items-center gap-2">
                         <span class="text-2xl">🎁</span>
                         <h3 class="font-bold text-lg" x-text="shopModeInventory ? 'Мои подарки' : 'Магазин подарков'"></h3>
                     </div>
                     <div class="flex items-center gap-3">
-                        <div class="bg-green-500/20 border border-green-500/40 px-3 py-1 rounded-full text-green-300 font-mono font-bold text-xs flex items-center gap-1">
-                            <span x-text="myLightnings"></span><span>⚡</span>
+                        <div class="bg-blue-500/20 border border-blue-500/40 px-3 py-1 rounded-full text-blue-300 font-mono font-bold text-xs flex items-center gap-1">
+                            <span x-text="myLightnings"></span><img src="/molniya.png" class="w-3 h-3 inline-block align-middle">
                         </div>
                         <button @click="showShopModal = false" class="text-gray-400 hover:text-white font-bold text-lg">✕</button>
                     </div>
@@ -946,12 +955,12 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     <template x-if="!shopModeInventory && shopTab === 'official'">
                         <div class="grid grid-cols-2 gap-3">
                             <template x-for="item in shopOfficial" :key="item.def_id">
-                                <div class="bg-gray-800/60 border border-gray-700/80 rounded-2xl p-3.5 flex flex-col items-center text-center justify-between group hover:border-green-500 transition">
+                                <div class="bg-gray-800/60 border border-gray-700/80 rounded-2xl p-3.5 flex flex-col items-center text-center justify-between group hover:border-blue-500 transition">
                                     <img :src="item.img" class="w-16 h-16 md:w-20 md:h-20 object-contain my-2 filter drop-shadow-md group-hover:scale-110 transition transform">
                                     <div class="w-full">
                                         <div class="font-bold text-sm text-white truncate" x-text="item.name"></div>
-                                        <button @click="executeBuyOfficialGift(item.def_id)" class="w-full mt-2.5 bg-green-600 hover:bg-green-500 text-black font-black py-2 rounded-xl text-xs shadow-md transition flex items-center justify-center gap-1">
-                                            <span>Купить за</span><span x-text="item.price"></span><span>⚡</span>
+                                        <button @click="executeBuyOfficialGift(item.def_id)" class="w-full mt-2.5 bg-blue-600 hover:bg-blue-500 text-white font-black py-2 rounded-xl text-xs shadow-md transition flex items-center justify-center gap-1">
+                                            <span>Купить за</span><span x-text="item.price"></span><img src="/molniya.png" class="w-3 h-3 inline-block align-middle">
                                         </button>
                                     </div>
                                 </div>
@@ -971,9 +980,9 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                         <img :src="item.img" class="w-14 h-14 md:w-18 md:h-18 object-contain my-2 filter drop-shadow-md group-hover:scale-110 transition transform">
                                         <div class="w-full">
                                             <div class="font-bold text-xs md:text-sm text-white truncate" x-text="item.name"></div>
-                                            <div class="text-[10px] text-gray-500 line-through">Гос: <span x-text="item.store_price"></span>⚡</div>
+                                            <div class="text-[10px] text-gray-500 line-through flex items-center justify-center gap-0.5">Гос: <span x-text="item.store_price"></span><img src="/molniya.png" class="w-2.5 h-2.5 inline-block"></div>
                                             <button @click="executeBuyMarketGift(item.user_gift_id)" class="w-full mt-1.5 bg-blue-600 hover:bg-blue-500 text-white font-black py-2 rounded-xl text-xs shadow-md transition flex items-center justify-center gap-1">
-                                                <span>Купить</span><span x-text="item.price"></span><span>⚡</span>
+                                                <span>Купить</span><span x-text="item.price"></span><img src="/molniya.png" class="w-3 h-3 inline-block align-middle">
                                             </button>
                                         </div>
                                     </div>
@@ -990,13 +999,13 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             <div class="grid grid-cols-2 gap-3">
                                 <template x-for="g in myGiftsInventory" :key="g.user_gift_id">
                                     <div @click="if(pinningSlotIndex !== null) executePinGiftToSlot(g.user_gift_id)" 
-                                         class="bg-gray-800/80 border border-gray-700 rounded-2xl p-3.5 flex flex-col items-center text-center justify-between group transition cursor-pointer hover:border-green-500">
-                                        <div class="text-[10px] font-mono text-green-400 font-bold w-full text-left">Подарок #<span x-text="g.user_gift_id"></span></div>
+                                         class="bg-gray-800/80 border border-gray-700 rounded-2xl p-3.5 flex flex-col items-center text-center justify-between group transition cursor-pointer hover:border-blue-500">
+                                        <div class="text-[10px] font-mono text-blue-400 font-bold w-full text-left">Подарок #<span x-text="g.user_gift_id"></span></div>
                                         <img :src="g.img" class="w-16 h-16 md:w-20 md:h-20 object-contain my-2 filter drop-shadow-lg group-hover:scale-110 transition transform">
                                         <div class="w-full">
                                             <div class="font-bold text-sm text-white truncate" x-text="g.name"></div>
                                             <template x-if="pinningSlotIndex !== null">
-                                                <div class="mt-2 bg-green-500/20 border border-green-500 text-green-300 text-[11px] font-black py-1 rounded-lg">Выбрать для слота</div>
+                                                <div class="mt-2 bg-blue-500/20 border border-blue-500 text-blue-300 text-[11px] font-black py-1 rounded-lg">Выбрать для слота</div>
                                             </template>
                                             <template x-if="pinningSlotIndex === null">
                                                 <div class="text-[10px] text-gray-400 mt-1" x-text="g.is_pinned ? 'Закреплен' : (g.is_for_sale ? 'На продаже (' + g.sale_price + '⚡)' : 'В коллекции')"></div>
@@ -1012,18 +1021,45 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         </div>
 
+        <div x-show="showPartnerGiftsModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" @click.self="showPartnerGiftsModal = false">
+            <div class="bg-[#1e293b] p-6 rounded-3xl border border-blue-500/40 w-full max-w-md shadow-2xl text-white max-h-[85vh] flex flex-col">
+                <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-3 flex-shrink-0">
+                    <div class="flex items-center gap-2">
+                        <span class="text-2xl">🎁</span>
+                        <h3 class="font-bold text-lg" x-text="'Подарки ' + (viewProfileData.first_name || '')"></h3>
+                    </div>
+                    <button @click="showPartnerGiftsModal = false" class="text-gray-400 hover:text-white font-bold text-lg">✕</button>
+                </div>
+                <div class="flex-1 overflow-y-auto pr-1">
+                    <template x-if="partnerGiftsList.length === 0">
+                        <div class="text-center py-10 text-gray-500 text-sm italic">У пользователя пока нет подарков</div>
+                    </template>
+                    <div class="grid grid-cols-2 gap-3">
+                        <template x-for="g in partnerGiftsList" :key="g.user_gift_id">
+                            <div class="bg-gray-800/80 border border-gray-700/80 rounded-2xl p-3.5 flex flex-col items-center text-center justify-between">
+                                <div class="text-[10px] font-mono text-blue-400 font-bold w-full text-left">Подарок #<span x-text="g.user_gift_id"></span></div>
+                                <img :src="g.img" class="w-16 h-16 md:w-20 md:h-20 object-contain my-2 filter drop-shadow-lg">
+                                <div class="font-bold text-sm text-white truncate w-full" x-text="g.name"></div>
+                                <div class="text-[10px] text-gray-400 mt-1" x-text="'Получен: ' + g.acquired_at"></div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div x-show="showGiftViewModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" @click.self="showGiftViewModal = false">
-            <div class="bg-[#1e293b] p-6 rounded-3xl border border-gray-700 w-full max-w-xs shadow-2xl text-white text-center flex flex-col items-center relative">
+            <div class="bg-[#1e293b] p-6 rounded-3xl border border-blue-500/40 w-full max-w-xs shadow-2xl text-white text-center flex flex-col items-center relative">
                 <button @click="showGiftViewModal = false" class="absolute top-4 right-4 text-gray-400 hover:text-white font-bold">✕</button>
                 
-                <div class="text-xs font-mono text-green-400 font-bold bg-green-500/10 border border-green-500/30 px-3 py-1 rounded-full mb-3">
+                <div class="text-xs font-mono text-blue-400 font-bold bg-blue-500/10 border border-blue-500/30 px-3 py-1 rounded-full mb-3">
                     Подарок #<span x-text="selectedGiftView ? selectedGiftView.user_gift_id : ''"></span>
                 </div>
 
                 <img :src="selectedGiftView ? selectedGiftView.img : ''" class="w-24 h-24 md:w-28 md:h-28 object-contain my-2 filter drop-shadow-xl">
 
                 <h3 class="text-lg font-black text-white mt-1" x-text="selectedGiftView ? selectedGiftView.name : ''"></h3>
-                <div class="text-xs text-gray-400 mt-0.5">Гос. стоимость: <span class="text-white font-bold" x-text="selectedGiftView ? selectedGiftView.store_price : ''"></span> ⚡</div>
+                <div class="text-xs text-gray-400 mt-0.5 flex items-center justify-center gap-1">Гос. стоимость: <span class="text-white font-bold" x-text="selectedGiftView ? selectedGiftView.store_price : ''"></span> <img src="/molniya.png" class="w-3 h-3 inline-block align-middle"></div>
 
                 <template x-if="isMyProfile && selectedGiftView">
                     <div class="w-full mt-5 pt-4 border-t border-gray-700/80 space-y-2" x-data="{ inputSalePrice: '' }">
@@ -1032,59 +1068,16 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         </template>
 
                         <div class="flex gap-1.5 pt-1">
-                            <input type="number" x-model="inputSalePrice" placeholder="Цена⚡" class="w-1/2 bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs text-center outline-none">
+                            <input type="number" x-model="inputSalePrice" placeholder="Цена" class="w-1/2 bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs text-center outline-none">
                             <button @click="executeToggleMarketSale(selectedGiftView.user_gift_id, inputSalePrice)" 
-                                    class="w-1/2 bg-blue-600 hover:bg-blue-500 text-white font-black py-2 rounded-xl text-xs transition shadow">
-                                <span x-text="selectedGiftView.is_for_sale ? 'Снять с продажи' : 'На Маркет'"></span>
+                                    class="w-1/2 bg-blue-600 hover:bg-blue-500 text-white font-black py-2 rounded-xl text-xs transition shadow flex items-center justify-center gap-0.5">
+                                <span x-text="selectedGiftView.is_for_sale ? 'Снять' : 'На Маркет'"></span>
+                                <template x-if="!selectedGiftView.is_for_sale"><img src="/molniya.png" class="w-2.5 h-2.5 inline-block"></template>
                             </button>
                         </div>
-                        <div x-show="selectedGiftView.is_for_sale" class="text-[10px] text-yellow-400 font-bold">Выставлен на рынок за <span x-text="selectedGiftView.sale_price"></span>⚡</div>
+                        <div x-show="selectedGiftView.is_for_sale" class="text-[10px] text-yellow-400 font-bold flex items-center justify-center gap-0.5">Выставлен за <span x-text="selectedGiftView.sale_price"></span><img src="/molniya.png" class="w-2.5 h-2.5 inline-block"></div>
                     </div>
                 </template>
-            </div>
-        </div>
-
-        <div x-show="contextMenu.show" @click.away="contextMenu.show = false" class="fixed bg-gray-800 border border-gray-700 text-white rounded-xl shadow-2xl w-44 py-1.5 z-50 text-xs md:text-sm font-medium" :style="`left: ${contextMenu.x}px; top: ${contextMenu.y}px;`" style="display: none;">
-             <button @click="actionReply()" class="w-full text-left px-4 py-2 hover:bg-gray-700 flex items-center gap-2 text-gray-200"><span>Ответить</span></button>
-             <template x-if="contextMenu.msg && contextMenu.msg.sender_id === myId && !contextMenu.msg.is_deleted && !contextMenu.msg.voice_base64">
-                 <button @click="actionEdit()" class="w-full text-left px-4 py-2 hover:bg-gray-700 flex items-center gap-2 text-gray-200"><span>Изменить</span></button>
-             </template>
-             <button @click="actionForward()" class="w-full text-left px-4 py-2 hover:bg-gray-700 flex items-center gap-2 text-gray-200"><span>Переслать</span></button>
-             <template x-if="contextMenu.msg && (contextMenu.msg.sender_id === myId || myProfileData.can_see_deleted) && !contextMenu.msg.is_deleted">
-                 <button @click="actionDelete()" class="w-full text-left px-4 py-2 hover:bg-red-950/40 text-red-400 flex items-center gap-2"><span>Удалить</span></button>
-             </template>
-             <template x-if="myProfileData.can_see_edits && contextMenu.msg && contextMenu.msg.is_edited">
-                 <button @click="actionShowHistory()" class="w-full text-left px-4 py-2 hover:bg-yellow-950/40 text-yellow-400 border-t border-gray-700 mt-1 flex items-center gap-2"><span>История изменений</span></button>
-             </template>
-        </div>
-
-        <div x-show="forwardModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-0 md:p-4" @click.self="forwardModal = false">
-             <div class="bg-[#1e293b] w-full h-full md:h-auto md:max-w-md md:rounded-xl shadow-2xl flex flex-col overflow-hidden border border-gray-700">
-                 <div class="p-4 bg-gray-900 border-b border-gray-700 flex justify-between items-center flex-shrink-0">
-                     <h3 class="font-bold text-white text-base">Переслать сообщение в...</h3>
-                     <button @click="forwardModal = false" class="text-gray-400 hover:text-white font-bold text-xl px-2">✕</button>
-                 </div>
-                 <div class="flex-1 overflow-y-auto max-h-full p-2 space-y-1">
-                     <template x-for="chat in chats" :key="chat.chat_id">
-                         <div @click="executeForward(chat.chat_id)" class="flex items-center gap-3 px-4 py-3 bg-gray-800/40 hover:bg-blue-600 rounded-lg cursor-pointer transition">
-                             <div class="w-10 h-10 rounded-full bg-gray-700 overflow-hidden flex items-center justify-center font-bold text-white flex-shrink-0">
-                                 <img x-show="chat.partner_avatar" :src="chat.partner_avatar" class="w-full h-full object-cover">
-                                 <span x-show="!chat.partner_avatar" x-text="chat.partner_name[0]"></span>
-                             </div>
-                             <div class="text-sm font-semibold text-white truncate" x-text="chat.partner_name"></div>
-                         </div>
-                     </template>
-                 </div>
-             </div>
-        </div>
-
-        <div x-show="showHistoryModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" @click.self="showHistoryModal = false">
-            <div class="bg-[#1e293b] p-5 rounded-xl border border-gray-700 max-w-sm w-full shadow-2xl">
-                <h3 class="text-yellow-400 font-bold mb-3 text-sm md:text-base">Исходный текст сообщения</h3>
-                <div class="text-gray-200 text-sm bg-gray-900 p-3 rounded border border-gray-800 whitespace-pre-wrap break-words max-h-60 overflow-y-auto select-text" x-text="historyText"></div>
-                <div class="mt-4 flex justify-end">
-                    <button @click="showHistoryModal = false" class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-1.5 px-4 rounded-full text-xs transition">Закрыть</button>
-                </div>
             </div>
         </div>
 
@@ -1105,6 +1098,9 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 imagePreview: null,
                 typing: {},
 
+                // ОЧЕРЕДЬ ОТПРАВКИ (ПЛОХОЙ ИНТЕРНЕТ + ⏳)
+                pendingMessagesToSend: {}, 
+
                 isRecording: false,
                 showMicInstructionBanner: false,
                 mediaRecorder: null,
@@ -1124,10 +1120,12 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 shopOfficial: [],
                 shopMarket: [],
                 myGiftsInventory: [],
-                pinnedGiftsSlots: [], // Скидывается с бэка: [{slot_index: 0, img: '...', name: '...'}, ...]
+                pinnedGiftsSlots: [], 
                 showGiftViewModal: false,
                 selectedGiftView: null,
                 pinningSlotIndex: null,
+                showPartnerGiftsModal: false,
+                partnerGiftsList: [],
 
                 contextMenu: { show: false, x: 0, y: 0, msg: null },
                 longPressTimer: null,
@@ -1151,15 +1149,39 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 init() {
                     this.fetchMyProfile();
                     this.socket = io();
-                    this.socket.on('connect', () => { this.loadChats(); });
+                    
+                    this.socket.on('connect', () => { 
+                        this.loadChats(); 
+                        // ПРИ ПОЯВЛЕНИИ СВЯЗИ ВЫСТРЕЛЮ В СОКЕТ ЛОКАЛЬНОЙ ОЧЕРЕДЬЮ!
+                        for (let tId in this.pendingMessagesToSend) {
+                            this.socket.emit('send_message', this.pendingMessagesToSend[tId]);
+                        }
+                    });
+                    
                     this.socket.on('force_logout', () => { window.location.href = '/logout'; });
+                    
                     this.socket.on('new_message', (data) => {
                         if (this.currentChat && this.currentChat.chat_id === data.chat_id) {
-                            if(data.sender_id !== this.myId) this.reloadCurrentMessages();
-                            else { this.messages.push(data); this.scrollToBottom(); }
+                            if(data.sender_id !== this.myId) {
+                                this.reloadCurrentMessages();
+                            } else {
+                                // ПОДТВЕРЖДЕНИЕ НАШЕГО СООБЩЕНИЯ С СЕРВЕРА
+                                let match = this.messages.find(m => m.client_temp_id === data.client_temp_id || m.id === data.client_temp_id);
+                                if (match) {
+                                    match.id = data.id;
+                                    match.is_pending = false; // ⏳ ПРЕВРАЩАЕТСЯ В ✓
+                                    delete this.pendingMessagesToSend[data.client_temp_id];
+                                } else {
+                                    this.messages.push(data);
+                                }
+                                this.scrollToBottom();
+                            }
+                        } else if (data.sender_id === this.myId && data.client_temp_id) {
+                            delete this.pendingMessagesToSend[data.client_temp_id];
                         }
                         this.loadChats();
                     });
+                    
                     this.socket.on('message_updated', (data) => {
                         if (this.currentChat && this.currentChat.chat_id === data.chat_id) this.reloadCurrentMessages();
                     });
@@ -1238,11 +1260,17 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 actionForward() { this.contextMenu.show = false; this.forwardMessageTarget = this.contextMenu.msg; this.forwardModal = true; },
                 executeForward(chatId) {
                     if (!this.forwardMessageTarget) return;
-                    this.socket.emit('send_message', {
+                    
+                    let tempId = 'pending_fwd_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4);
+                    let payload = {
+                        client_temp_id: tempId,
                         chat_id: chatId, text: this.forwardMessageTarget.text,
                         image_base64: this.forwardMessageTarget.image_base64, voice_base64: this.forwardMessageTarget.voice_base64,
                         forwarded_from_id: this.forwardMessageTarget.sender_id
-                    });
+                    };
+                    this.pendingMessagesToSend[tempId] = payload;
+                    if(this.socket.connected) this.socket.emit('send_message', payload);
+                    
                     this.forwardModal = false; this.forwardMessageTarget = null; this.loadChats();
                 },
                 actionDelete() {
@@ -1357,21 +1385,28 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         this.showGiftViewModal = true;
                     } else if(this.isMyProfile) {
                         this.pinningSlotIndex = slotIndex;
-                        this.openGiftsShop(true); // Открываем инвентарь для выбора подарка в этот слот
+                        this.openGiftsShop(true); 
                     }
                 },
                 async openGiftsShop(forceInventory = false) {
-                    this.shopModeInventory = forceInventory || (this.isMyProfile && event && event.target.innerText.includes('Мои'));
-                    if(!this.shopModeInventory) {
-                        const res = await fetch('/api/shop');
-                        const data = await res.json();
-                        this.shopOfficial = data.new_store;
-                        this.shopMarket = data.user_market;
+                    if (this.isMyProfile || forceInventory) {
+                        this.shopModeInventory = forceInventory || (event && event.target.innerText.includes('Мои'));
+                        if(!this.shopModeInventory) {
+                            const res = await fetch('/api/shop');
+                            const data = await res.json();
+                            this.shopOfficial = data.new_store;
+                            this.shopMarket = data.user_market;
+                        } else {
+                            const res = await fetch('/api/gifts/my');
+                            this.myGiftsInventory = await res.json();
+                        }
+                        this.showShopModal = true;
                     } else {
-                        const res = await fetch('/api/gifts/my');
-                        this.myGiftsInventory = await res.json();
+                        // ЧУЖОЙ ПРОФИЛЬ -> ВЫВОЖУ ВСЕ ЕГО ПОДАРКИ!
+                        const res = await fetch('/api/gifts/user/' + this.viewProfileData.id);
+                        this.partnerGiftsList = await res.json();
+                        this.showPartnerGiftsModal = true;
                     }
-                    this.showShopModal = true;
                 },
                 async executeBuyOfficialGift(defId) {
                     const res = await fetch('/api/shop/buy_official', {
@@ -1463,7 +1498,22 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 async reloadCurrentMessages() {
                     if (!this.currentChat) return;
                     const res = await fetch('/api/chat/' + this.currentChat.chat_id + '/messages');
-                    this.messages = await res.json();
+                    let dbMsgs = await res.json();
+                    
+                    // ПОДМЕШИВАЕМ ЛОКАЛЬНЫЕ НЕОТПРАВЛЕННЫЕ СООБЩЕНИЯ ЭТОГО ЧАТА (⏳)
+                    let unconfirmed = [];
+                    for (let tId in this.pendingMessagesToSend) {
+                        let p = this.pendingMessagesToSend[tId];
+                        if (p.chat_id === this.currentChat.chat_id) {
+                            unconfirmed.push({
+                                id: tId, client_temp_id: tId, sender_id: this.myId,
+                                text: p.text || '', image_base64: p.image_base64 || null, voice_base64: p.voice_base64 || null,
+                                time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
+                                is_read: false, is_pending: true
+                            });
+                        }
+                    }
+                    this.messages = [...dbMsgs, ...unconfirmed];
                     this.scrollToBottom();
                 },
 
@@ -1482,11 +1532,32 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         });
                         this.editMessage = null;
                     } else {
-                        const payload = {
+                        // ЛОКАЛЬНАЯ ОЧЕРЕДЬ ОТПРАВКИ (⏳)
+                        let tempId = 'pending_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4);
+                        
+                        let payload = {
+                            client_temp_id: tempId,
                             chat_id: this.currentChat.chat_id, text: this.newMessage.trim(),
                             image_base64: this.imagePreview, reply_to_id: this.replyToMessage ? this.replyToMessage.id : null
                         };
-                        this.socket.emit('send_message', payload);
+
+                        let repText = this.replyToMessage ? (this.replyToMessage.voice_base64 ? '[Голосовое]' : (this.replyToMessage.text || '[Фото]')) : '';
+
+                        let localObj = {
+                            id: tempId, client_temp_id: tempId, sender_id: this.myId,
+                            text: payload.text, image_base64: payload.image_base64, voice_base64: null,
+                            time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
+                            is_read: false, is_deleted: false, is_edited: false,
+                            is_pending: true, // ВЕШАЕМ ЧАСИКИ ⏳
+                            reply_to_id: payload.reply_to_id, reply_text: repText
+                        };
+
+                        this.messages.push(localObj);
+                        this.scrollToBottom();
+
+                        this.pendingMessagesToSend[tempId] = payload;
+                        if (this.socket.connected) this.socket.emit('send_message', payload);
+                        
                         this.replyToMessage = null;
                     }
                     this.newMessage = '';
@@ -1527,11 +1598,30 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             reader.readAsDataURL(audioBlob);
                             reader.onloadend = () => {
                                 const base64Audio = reader.result;
-                                const payload = {
-                                    chat_id: this.currentChat.chat_id, voice_base64: base64Audio,
-                                    reply_to_id: this.replyToMessage ? this.replyToMessage.id : null
+                                let tempId = 'pending_voice_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4);
+
+                                let payload = {
+                                    client_temp_id: tempId, chat_id: this.currentChat.chat_id, 
+                                    voice_base64: base64Audio, reply_to_id: this.replyToMessage ? this.replyToMessage.id : null
                                 };
-                                this.socket.emit('send_message', payload);
+
+                                let repText = this.replyToMessage ? (this.replyToMessage.voice_base64 ? '[Голосовое]' : (this.replyToMessage.text || '[Фото]')) : '';
+
+                                let localObj = {
+                                    id: tempId, client_temp_id: tempId, sender_id: this.myId,
+                                    text: '', image_base64: null, voice_base64: base64Audio,
+                                    time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
+                                    is_read: false, is_deleted: false, is_edited: false,
+                                    is_pending: true, // ВЕШАЕМ ЧАСИКИ ⏳
+                                    reply_to_id: payload.reply_to_id, reply_text: repText
+                                };
+
+                                this.messages.push(localObj);
+                                this.scrollToBottom();
+
+                                this.pendingMessagesToSend[tempId] = payload;
+                                if (this.socket.connected) this.socket.emit('send_message', payload);
+
                                 this.replyToMessage = null;
                             };
                             stream.getTracks().forEach(track => track.stop());
@@ -1575,21 +1665,30 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         {% endif %}{% endwith %}
 
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
             {% if current_user.is_admin or current_user.perm_grant_lightnings %}
             <form action="{{ url_for('admin_grant_lightnings') }}" method="POST" class="bg-gray-800 p-4 rounded-2xl border border-gray-700 flex flex-col gap-2.5 shadow">
-                <div class="font-black text-green-400 text-sm flex items-center gap-1"><span>⚡</span><span>Выдать молнии пользователю</span></div>
+                <div class="font-black text-blue-400 text-xs md:text-sm flex items-center gap-1"><img src="/molniya.png" class="w-4 h-4 object-contain"><span>Зачислить молнии</span></div>
                 <select name="user_id" class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
                     {% for u in users %}<option value="{{ u.id }}">{{ u.username }} ({{ u.first_name }})</option>{% endfor %}
                 </select>
-                <input type="number" name="amount" placeholder="Количество ⚡" required class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
-                <button type="submit" class="bg-green-600 hover:bg-green-500 text-black font-black py-2 rounded-xl text-xs transition">Зачислить</button>
+                <input type="number" name="amount" placeholder="Количество" required class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
+                <button type="submit" class="bg-blue-600 hover:bg-blue-500 text-white font-black py-2 rounded-xl text-xs transition">Зачислить</button>
+            </form>
+
+            <form action="{{ url_for('admin_deduct_lightnings') }}" method="POST" class="bg-gray-800 p-4 rounded-2xl border border-gray-700 flex flex-col gap-2.5 shadow">
+                <div class="font-black text-red-400 text-xs md:text-sm flex items-center gap-1"><img src="/molniya.png" class="w-4 h-4 object-contain"><span>Списать молнии</span></div>
+                <select name="user_id" class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
+                    {% for u in users %}<option value="{{ u.id }}">{{ u.username }} ({{ u.first_name }})</option>{% endfor %}
+                </select>
+                <input type="number" name="amount" placeholder="Количество" required class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
+                <button type="submit" class="bg-red-600 hover:bg-red-500 text-white font-black py-2 rounded-xl text-xs transition">Списать</button>
             </form>
             {% endif %}
 
             {% if current_user.is_admin or current_user.perm_grant_gifts %}
             <form action="{{ url_for('admin_grant_gift') }}" method="POST" class="bg-gray-800 p-4 rounded-2xl border border-gray-700 flex flex-col gap-2.5 shadow">
-                <div class="font-black text-blue-400 text-sm flex items-center gap-1"><span>🎁</span><span>Выдать официальный подарок</span></div>
+                <div class="font-black text-blue-400 text-xs md:text-sm flex items-center gap-1"><span>🎁</span><span>Выдать подарок</span></div>
                 <select name="user_id" class="bg-gray-900 border border-gray-600 rounded-xl p-2 text-white text-xs outline-none">
                     {% for u in users %}<option value="{{ u.id }}">{{ u.username }} ({{ u.first_name }})</option>{% endfor %}
                 </select>
@@ -1623,7 +1722,7 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
                                 {% if u.banned_until %}<span class="bg-red-950 border border-red-700 text-red-400 px-1.5 py-0.5 rounded text-[10px] font-bold">Banned</span>{% endif %}
                             </div>
                             <div class="text-[10px] md:text-xs text-blue-400 flex items-center gap-2">
-                                <span>@{{ u.username }}</span><span class="text-green-400 font-mono font-bold">{{ u.lightnings or 0 }}⚡</span>
+                                <span>@{{ u.username }}</span><span class="text-blue-400 font-mono font-bold flex items-center gap-0.5">{{ u.lightnings or 0 }}<img src="/molniya.png" class="w-3 h-3 inline-block"></span>
                             </div>
                         </td>
                         <td class="p-3 md:p-4 text-gray-400">
@@ -1788,6 +1887,10 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
 def serve_logo():
     return send_from_directory(os.getcwd(), 'logo.png')
 
+@app.route('/molniya.png')
+def serve_molniya():
+    return send_from_directory(os.getcwd(), 'molniya.png')
+
 @app.route('/screen<int:num>')
 def serve_instruction_screenshot(num):
     for ext in ['.jpg', '.png', '.jpeg', '.webp']:
@@ -1796,7 +1899,6 @@ def serve_instruction_screenshot(num):
             return send_from_directory(os.getcwd(), fname)
     return "Скриншот не найден", 404
 
-# НОВОЕ: Универсальный роут для картинок подарков из корня проекта!
 @app.route('/podarok<int:num>.png')
 def serve_gift_png(num):
     fname = f"podarok{num}.png"
@@ -1962,9 +2064,18 @@ def get_user_profile(user_id):
         'pinned_gifts': pinned_data
     })
 
-# ==========================================
-# НОВОЕ API: КВЕСТЫ, МАГАЗИН И ПОДАРКИ
-# ==========================================
+# НОВОЕ: Отдача абсолютно всех подарков пользователя для чужого профиля
+@app.route('/api/gifts/user/<int:target_id>')
+@login_required
+def get_user_all_gifts_endpoint(target_id):
+    items = UserGift.query.filter_by(owner_id=target_id).order_by(UserGift.id.desc()).all()
+    res = [{
+        'user_gift_id': g.id, 'name': g.gift_def.name, 'store_price': g.gift_def.price,
+        'img': f"/podarok{g.gift_def.id}.png", 'is_pinned': g.is_pinned,
+        'acquired_at': g.acquired_at.strftime('%d.%m.%Y %H:%M')
+    } for g in items]
+    return jsonify(res)
+
 @app.route('/api/quests', methods=['GET'])
 @login_required
 def get_daily_quests():
@@ -2304,7 +2415,21 @@ def admin_grant_lightnings():
     if u and amt > 0:
         u.lightnings = (u.lightnings or 0) + amt
         db.session.commit()
-        flash(f"Начислено {amt}⚡ пользователю {u.username}", 'success')
+        flash(f"Начислено {amt} молний пользователю {u.username}", 'success')
+    return redirect(url_for('admin_panel'))
+
+# НОВОЕ: Списание молний в Админке
+@app.route('/admin/deduct_lightnings', methods=['POST'])
+@login_required
+def admin_deduct_lightnings():
+    if not (has_admin_priv() or current_user.perm_grant_lightnings): abort(403)
+    uid = request.form.get('user_id')
+    amt = int(request.form.get('amount', 0))
+    u = User.query.get(uid)
+    if u and amt > 0:
+        u.lightnings = max((u.lightnings or 0) - amt, 0)
+        db.session.commit()
+        flash(f"Списано {amt} молний у пользователя {u.username}", 'success')
     return redirect(url_for('admin_panel'))
 
 @app.route('/admin/grant_gift', methods=['POST'])
@@ -2440,19 +2565,34 @@ def handle_connect():
         banned, _, _ = check_user_banned(current_user)
         if banned: return False 
 
-        join_room(f"user_{current_user.id}")
-        connected_users[current_user.id] = request.sid
+        uid = current_user.id
+        connected_users[uid] = request.sid
+        join_room(f"user_{uid}")
         current_user.last_seen = now_msk()
         db.session.commit()
-        broadcast_user_status(current_user.id)
+        broadcast_user_status(uid)
 
+# НОВОЕ: Задержка офлайн-статуса на 7 секунд для плохого интернета!
 @socketio.on('disconnect')
 def handle_disconnect():
     if current_user.is_authenticated:
-        if current_user.id in connected_users: del connected_users[current_user.id]
-        if current_user.id in active_chat_views: del active_chat_views[current_user.id]
-        u = User.query.get(current_user.id)
-        if u: u.last_seen = now_msk(); db.session.commit(); broadcast_user_status(current_user.id)
+        uid = current_user.id
+        disc_sid = request.sid
+
+        def delayed_offline_check(check_uid, check_sid):
+            socketio.sleep(7.0) # Ждём ровно 7 секунд!
+            # Если через 7 секунд SID юзера всё ещё старый (значит он не переподключился)
+            if connected_users.get(check_uid) == check_sid:
+                del connected_users[check_uid]
+                if check_uid in active_chat_views:
+                    del active_chat_views[check_uid]
+                u = User.query.get(check_uid)
+                if u: 
+                    u.last_seen = now_msk()
+                    db.session.commit()
+                    broadcast_user_status(check_uid)
+
+        socketio.start_background_task(delayed_offline_check, uid, disc_sid)
 
 @socketio.on('open_chat')
 def handle_open_chat(data):
@@ -2480,6 +2620,7 @@ def handle_message(data):
     text = data.get('text', '')
     img = data.get('image_base64')
     voice = data.get('voice_base64')
+    client_temp_id = data.get('client_temp_id') # Принимаем временный ID из очереди!
 
     partner_cp = ChatParticipant.query.filter(ChatParticipant.chat_id == chat_id, ChatParticipant.user_id != current_user.id).first()
     if partner_cp:
@@ -2495,7 +2636,6 @@ def handle_message(data):
     db.session.add(msg)
     db.session.commit()
 
-    # ХУК НА КВЕСТЫ
     has_photo = bool(img)
     hook_track_message(current_user.id, reply_to_id, has_photo)
 
@@ -2514,6 +2654,7 @@ def handle_message(data):
 
     msg_data = {
         'id': msg.id, 'chat_id': chat_id, 'sender_id': current_user.id,
+        'client_temp_id': client_temp_id, # Возвращаем клиенту его ID для снятия часиков ⏳!
         'text': msg.text, 'image_base64': msg.image_base64, 'voice_base64': msg.voice_base64,
         'time': msg.timestamp.strftime('%H:%M'), 'is_read': False,
         'is_deleted': False, 'is_edited': False, 'original_text': None,
@@ -2570,7 +2711,6 @@ def init_db():
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_bday VARCHAR(20) DEFAULT 'everyone';"))
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS privacy_last_seen VARCHAR(20) DEFAULT 'everyone';"))
 
-            # НОВЫЕ ПОЛЯ ПОДАРКОВ И КВЕСТОВ
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS lightnings INTEGER DEFAULT 0;"))
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS q3_claimed BOOLEAN DEFAULT FALSE;"))
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS perm_grant_gifts BOOLEAN DEFAULT FALSE;"))
@@ -2579,7 +2719,6 @@ def init_db():
             db.session.execute(text("ALTER TABLE users ALTER COLUMN last_name DROP NOT NULL;"))
             db.session.commit()
             
-            # Посев 4 стартовых подарков
             if not GiftDefinition.query.first():
                 db.session.add_all([
                     GiftDefinition(id=1, name="Песочный замок", image_filename="podarok1.png", price=250),
