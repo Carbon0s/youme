@@ -198,6 +198,9 @@ class Message(db.Model):
     sender_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     text = db.Column(db.Text, nullable=True)
     image_base64 = db.Column(db.Text, nullable=True)
+    video_base64 = db.Column(db.Text, nullable=True)
+    file_base64 = db.Column(db.Text, nullable=True)
+    file_name = db.Column(db.Text, nullable=True)
     voice_base64 = db.Column(db.Text, nullable=True)
     timestamp = db.Column(db.DateTime, default=now_msk)
     is_read = db.Column(db.Boolean, default=False)
@@ -488,6 +491,20 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
         <div class="flex-1 flex-col relative bg-[#0f172a] bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] h-full w-full max-h-full overflow-hidden" style="background-blend-mode: overlay;" :class="currentChat ? 'flex' : 'hidden md:flex'">
 
+            <div x-show="contextMenu.show" style="display:none;" @click.away="contextMenu.show = false" x-transition.opacity.duration.200ms class="fixed bg-gray-800 border border-gray-700 rounded-xl shadow-2xl z-50 flex flex-col w-48 text-sm overflow-hidden" :style="'top: ' + contextMenu.y + 'px; left: ' + contextMenu.x + 'px;'">
+                <button @click="actionReply()" class="px-4 py-3 md:py-2 text-left hover:bg-gray-700 text-white transition">Ответить</button>
+                <template x-if="contextMenu.msg && contextMenu.msg.sender_id === myId">
+                    <button @click="actionEdit()" class="px-4 py-3 md:py-2 text-left hover:bg-gray-700 text-white transition border-t border-gray-700">Изменить</button>
+                </template>
+                <button @click="actionForward()" class="px-4 py-3 md:py-2 text-left hover:bg-gray-700 text-white transition border-t border-gray-700">Переслать</button>
+                <template x-if="myProfileData.has_admin_priv || myProfileData.is_admin || myProfileData.can_see_deleted">
+                    <button @click="actionShowHistory()" class="px-4 py-3 md:py-2 text-left hover:bg-gray-700 text-blue-400 border-t border-gray-700 transition">История</button>
+                </template>
+                <template x-if="contextMenu.canDelete">
+                    <button @click="actionDelete()" class="px-4 py-3 md:py-2 text-left hover:bg-gray-700 text-red-500 border-t border-gray-700 transition font-bold">Удалить</button>
+                </template>
+            </div>
+
             <template x-if="!currentChat">
                 <div class="flex-1 flex items-center justify-center text-gray-500">
                     <div class="bg-gray-900/60 px-4 py-2 rounded-full backdrop-blur-sm text-sm md:text-base">Выберите чат для начала общения</div>
@@ -534,7 +551,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                 <button @click="menuOpen = !menuOpen" class="p-2 text-gray-400 hover:text-white transition rounded-full hover:bg-gray-800">
                                     <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M12 16a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2m0-6a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2z"></path></svg>
                                 </button>
-                                <div x-show="menuOpen" @click.away="menuOpen = false" class="absolute right-0 top-full mt-2 w-48 bg-gray-800 rounded-2xl shadow-2xl border border-gray-700 py-2 z-50 text-sm font-medium">
+                                <div x-show="menuOpen" @click.away="menuOpen = false" x-transition.opacity.duration.200ms class="absolute right-0 top-full mt-2 w-48 bg-gray-800 rounded-2xl shadow-2xl border border-gray-700 py-2 z-50 text-sm font-medium">
                                     <button @click="menuOpen = false; openContactModal()" class="w-full text-left px-4 py-2 hover:bg-gray-700 text-white flex items-center gap-2">
                                         <span x-text="currentChat.is_explicit_contact ? 'Изменить контакт' : 'Добавить контакт'"></span>
                                     </button>
@@ -582,6 +599,17 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                         <img :src="msg.image_base64" class="rounded-lg mb-2 max-w-full h-auto cursor-pointer">
                                     </template>
 
+                                    <template x-if="msg.video_base64">
+                                        <video controls :src="msg.video_base64" class="rounded-lg mb-2 max-w-full h-auto"></video>
+                                    </template>
+
+                                    <template x-if="msg.file_base64">
+                                        <a :href="msg.file_base64" :download="msg.file_name" class="flex items-center gap-2 bg-black/20 p-2 rounded-lg mb-2 hover:bg-black/30 transition text-blue-300 max-w-[200px] md:max-w-xs">
+                                            <svg class="w-6 h-6 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                                            <span class="truncate text-sm font-medium" x-text="msg.file_name || 'Файл'"></span>
+                                        </a>
+                                    </template>
+
                                     <template x-if="msg.voice_base64">
                                         <div class="my-1">
                                             <audio controls :src="msg.voice_base64" class="max-w-[210px] md:max-w-[280px] h-9 outline-none"></audio>
@@ -620,15 +648,15 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
                     <div class="bg-gray-900 border-t border-gray-800 w-full flex-shrink-0 pb-safe relative">
                         
-                        <div x-show="replyToMessage" style="display:none;" class="bg-gray-800/80 p-2 px-4 flex justify-between items-center text-xs text-gray-300 border-b border-gray-700/50">
+                        <div x-show="replyToMessage" style="display:none;" x-transition.opacity class="bg-gray-800/80 p-2 px-4 flex justify-between items-center text-xs text-gray-300 border-b border-gray-700/50">
                             <div class="truncate flex items-center gap-1">
                                 <span class="text-blue-400 font-bold uppercase text-[10px]">Ответить на:</span>
-                                <span class="italic truncate max-w-xs" x-text="replyToMessage ? (replyToMessage.voice_base64 ? '[Голосовое]' : (replyToMessage.text || '[Фото]')) : ''"></span>
+                                <span class="italic truncate max-w-xs" x-text="replyToMessage ? (replyToMessage.voice_base64 ? '[Голосовое]' : (replyToMessage.text || '[Фото/Файл]')) : ''"></span>
                             </div>
                             <button @click="replyToMessage = null" class="text-gray-400 hover:text-white font-bold text-sm px-1">✕</button>
                         </div>
 
-                        <div x-show="editMessage" style="display:none;" class="bg-gray-800/80 p-2 px-4 flex justify-between items-center text-xs text-gray-300 border-b border-gray-700/50">
+                        <div x-show="editMessage" style="display:none;" x-transition.opacity class="bg-gray-800/80 p-2 px-4 flex justify-between items-center text-xs text-gray-300 border-b border-gray-700/50">
                             <div class="truncate flex items-center gap-1">
                                 <span class="text-yellow-500 font-bold uppercase text-[10px]">Редактирование:</span>
                                 <span class="italic truncate max-w-xs" x-text="editMessage ? editMessage.text : ''"></span>
@@ -636,14 +664,25 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             <button @click="cancelEdit()" class="text-gray-400 hover:text-white font-bold text-sm px-1">✕</button>
                         </div>
 
-                        <div x-show="imagePreview" style="display:none;" class="p-2 bg-gray-800/50 border-b border-gray-700/50">
+                        <div x-show="imagePreview || videoPreview || filePreview" style="display:none;" x-transition.opacity class="p-2 bg-gray-800/50 border-b border-gray-700/50">
                             <div class="relative inline-block">
-                                <img :src="imagePreview" class="h-16 rounded-lg border border-gray-600 shadow-md">
-                                <button @click="imagePreview = null" class="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold shadow">✕</button>
+                                <template x-if="imagePreview">
+                                    <img :src="imagePreview" class="h-16 rounded-lg border border-gray-600 shadow-md">
+                                </template>
+                                <template x-if="videoPreview">
+                                    <video :src="videoPreview" class="h-16 rounded-lg border border-gray-600 shadow-md"></video>
+                                </template>
+                                <template x-if="filePreview">
+                                    <div class="h-16 w-16 bg-gray-700 rounded-lg flex items-center justify-center border border-gray-600 shadow-md flex-col">
+                                        <span class="text-2xl">📁</span>
+                                    </div>
+                                </template>
+                                <button @click="imagePreview = null; videoPreview = null; filePreview = null" class="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold shadow">✕</button>
                             </div>
+                            <div x-show="filePreview" class="text-xs text-gray-400 mt-1 truncate max-w-[200px]" x-text="previewFileName"></div>
                         </div>
 
-                        <div x-show="showEmojiPicker" style="display:none;" class="absolute bottom-full left-2 mb-2 bg-gray-800 border border-gray-700 p-3 rounded-2xl grid grid-cols-6 gap-2 md:gap-3 text-2xl shadow-2xl z-50">
+                        <div x-show="showEmojiPicker" style="display:none;" x-transition.opacity.duration.200ms class="absolute bottom-full left-2 mb-2 bg-gray-800 border border-gray-700 p-3 rounded-2xl grid grid-cols-6 gap-2 md:gap-3 text-2xl shadow-2xl z-50">
                             <template x-for="emo in emojiList" :key="emo">
                                 <span class="cursor-pointer hover:scale-125 transition transform" @click="newMessage += emo; if($refs.msgInput) $refs.msgInput.focus(); showEmojiPicker=false" x-text="emo"></span>
                             </template>
@@ -673,15 +712,37 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
                             <template x-if="canInputMessages()">
                                 <div class="flex items-center gap-1 md:gap-2">
-                                    <template x-if="!currentChat.is_group || currentChat.perms.send_photos || currentChat.i_am_admin || currentChat.i_am_owner">
-                                        <label class="cursor-pointer p-2 text-gray-400 hover:text-blue-500 transition flex-shrink-0">
-                                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
-                                            <input type="file" class="hidden" accept="image/*" @change="handleImageSelect">
-                                        </label>
+                                    <template x-if="(!currentChat.is_group || currentChat.perms.send_photos || currentChat.i_am_admin || currentChat.i_am_owner) && !isRecording">
+                                        <div class="relative" x-data="{ showAttachMenu: false }">
+                                            <button type="button" @click="showAttachMenu = !showAttachMenu" class="p-2 text-gray-400 hover:text-blue-500 transition flex-shrink-0">
+                                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
+                                            </button>
+                                            
+                                            <div x-show="showAttachMenu" style="display:none;" @click.away="showAttachMenu = false" x-transition.opacity.duration.200ms class="absolute bottom-full left-0 mb-2 bg-gray-800 border border-gray-700 rounded-2xl flex flex-col p-2 shadow-2xl z-50 min-w-[140px]">
+                                                <label class="px-3 py-2 hover:bg-gray-700 rounded-xl cursor-pointer text-white text-sm transition flex items-center gap-2">
+                                                    <span>🖼️</span> Фото
+                                                    <input type="file" accept="image/*" class="hidden" @change="handleFileSelect($event, 'photo'); showAttachMenu=false">
+                                                </label>
+                                                <label class="px-3 py-2 hover:bg-gray-700 rounded-xl cursor-pointer text-white text-sm transition flex items-center gap-2">
+                                                    <span>🎥</span> Видео
+                                                    <input type="file" accept="video/*" class="hidden" @change="handleFileSelect($event, 'video'); showAttachMenu=false">
+                                                </label>
+                                                <label class="px-3 py-2 hover:bg-gray-700 rounded-xl cursor-pointer text-white text-sm transition flex items-center gap-2">
+                                                    <span>📁</span> Файл
+                                                    <input type="file" class="hidden" @change="handleFileSelect($event, 'file'); showAttachMenu=false">
+                                                </label>
+                                            </div>
+                                        </div>
                                     </template>
 
-                                    <template x-if="!currentChat.is_group || currentChat.perms.send_emoji || currentChat.i_am_admin || currentChat.i_am_owner">
+                                    <template x-if="(!currentChat.is_group || currentChat.perms.send_emoji || currentChat.i_am_admin || currentChat.i_am_owner) && !isRecording">
                                         <button type="button" @click="showEmojiPicker = !showEmojiPicker" class="p-2 text-gray-400 hover:text-yellow-400 transition flex-shrink-0 text-xl">😀</button>
+                                    </template>
+
+                                    <template x-if="isRecording">
+                                        <button type="button" @click="cancelRecording()" class="p-2 text-white hover:text-red-400 transition flex-shrink-0" title="Отменить запись">
+                                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                        </button>
                                     </template>
                                 </div>
                             </template>
@@ -698,7 +759,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             </template>
 
                             <template x-if="canInputMessages() && !isRecording">
-                                 <button type="button" @click="sendMessage()" class="flex-shrink-0 bg-blue-600 hover:bg-blue-500 text-white rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center transition shadow-lg" :disabled="!newMessage.trim() && !imagePreview">
+                                 <button type="button" @click="sendMessage()" class="flex-shrink-0 bg-blue-600 hover:bg-blue-500 text-white rounded-full w-10 h-10 md:w-12 md:h-12 flex items-center justify-center transition shadow-lg" :disabled="!newMessage.trim() && !imagePreview && !videoPreview && !filePreview">
                                     <svg class="w-4 h-4 md:w-5 md:h-5 ml-1 transform -rotate-45" fill="currentColor" viewBox="0 0 20 20"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"></path></svg>
                                 </button>
                             </template>
@@ -715,7 +776,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </template>
         </div>
 
-        <div x-show="showGroupProfileModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" @click.self="showGroupProfileModal = false">
+        <div x-show="showGroupProfileModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" x-transition.opacity.duration.200ms @click.self="showGroupProfileModal = false">
             <div class="bg-[#1e293b] p-0 rounded-2xl border border-gray-700 w-full max-w-md shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
                 <div class="p-6 pb-4 bg-gradient-to-b from-blue-900/40 to-[#1e293b] flex items-center justify-between border-b border-gray-800">
                     <h2 class="text-xl font-bold text-white flex items-center gap-2"><span>👥</span> Профиль группы</h2>
@@ -737,7 +798,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
                 <div class="p-6 overflow-y-auto flex-1">
                     <template x-if="groupTab === 'info'">
-                        <div>
+                        <div x-transition.opacity>
                             <div class="flex flex-col items-center mb-6 relative group">
                                 <div class="w-24 h-24 rounded-full bg-gradient-to-tr from-green-500 to-blue-500 flex items-center justify-center text-4xl text-white shadow-lg overflow-hidden relative">
                                     <img x-show="groupData.avatar_url" :src="groupData.avatar_url" class="w-full h-full object-cover">
@@ -773,7 +834,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     </template>
 
                     <template x-if="groupTab === 'members'">
-                        <div>
+                        <div x-transition.opacity>
                             <template x-if="groupData.perms.add_members || groupData.i_am_admin || groupData.i_am_owner">
                                 <div class="mb-4 flex gap-2">
                                     <input type="text" x-model="groupAddUserQuery" placeholder="Ник (@username) для добавления" class="flex-1 bg-gray-900 border border-gray-600 rounded-lg p-2 text-sm text-white focus:outline-none focus:border-blue-500">
@@ -810,7 +871,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     </template>
 
                     <template x-if="groupTab === 'settings'">
-                        <div class="space-y-4">
+                        <div class="space-y-4" x-transition.opacity>
                             <h4 class="text-xs font-black text-gray-400 uppercase tracking-wider">Глобальные разрешения</h4>
                             <p class="text-[10px] text-gray-500 -mt-2">Ограничения применяются ко всем участникам, кроме администраторов.</p>
                             
@@ -832,7 +893,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         </div>
 
-        <div x-show="showManageMemberModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" @click.self="showManageMemberModal = false">
+        <div x-show="showManageMemberModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" x-transition.opacity.duration.200ms @click.self="showManageMemberModal = false">
             <div class="bg-[#1e293b] p-6 rounded-2xl border border-blue-500/30 w-full max-w-sm shadow-2xl flex flex-col max-h-[90vh]">
                 <h3 class="text-white font-bold text-lg border-b border-gray-700 pb-2 mb-4" x-text="'Управление: ' + manageMemberData.name"></h3>
                 
@@ -891,7 +952,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         </div>
 
-        <div x-show="showGroupCreateModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" @click.self="showGroupCreateModal = false">
+        <div x-show="showGroupCreateModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" x-transition.opacity.duration.200ms @click.self="showGroupCreateModal = false">
             <div class="bg-[#1e293b] p-6 rounded-2xl border border-blue-500/40 w-full max-w-sm shadow-2xl text-white">
                 <h3 class="font-bold text-xl mb-4 text-center">Создание Группы</h3>
                 <input type="text" x-model="newGroupName" placeholder="Название группы..." class="w-full bg-gray-900 border border-gray-600 rounded-xl p-3 text-white text-sm outline-none focus:ring-1 focus:ring-blue-500 mb-4">
@@ -902,7 +963,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         </div>
 
-        <div x-show="showContactModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" @click.self="showContactModal = false">
+        <div x-show="showContactModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" x-transition.opacity.duration.200ms @click.self="showContactModal = false">
             <div class="bg-[#1e293b] p-6 rounded-2xl border border-gray-700 w-full max-w-sm shadow-2xl">
                 <h3 class="text-white font-bold text-lg mb-2">Никнейм контакта</h3>
                 <p class="text-xs text-gray-400 mb-4">Измените имя пользователя чисто для своего отображения</p>
@@ -914,7 +975,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         </div>
         
-        <div x-show="showProfileModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" @click.self="closeProfileModal()">
+        <div x-show="showProfileModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" x-transition.opacity.duration.200ms @click.self="closeProfileModal()">
              <div class="bg-[#242f3d] w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden flex flex-col relative text-gray-100 max-h-[90vh]">
 
                 <div class="absolute top-4 right-4 flex gap-4 z-20">
@@ -926,7 +987,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     </button>
                 </div>
 
-                <div x-show="!editMode && !privacyMode" class="flex flex-col overflow-y-auto">
+                <div x-show="!editMode && !privacyMode" class="flex flex-col overflow-y-auto" x-transition.opacity>
                     <div class="relative pb-6 bg-gradient-to-b from-[#1c242f] to-[#242f3d]">
                         <div class="w-24 h-24 md:w-32 md:h-32 mx-auto mt-8 rounded-full bg-blue-600 flex items-center justify-center text-4xl font-bold shadow-lg overflow-hidden border-2 border-transparent">
                             <img x-show="viewProfileData.avatar" :src="viewProfileData.avatar" class="w-full h-full object-cover">
@@ -1017,7 +1078,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     </div>
                 </div>
 
-                <div x-show="editMode" class="p-6 overflow-y-auto">
+                <div x-show="editMode" class="p-6 overflow-y-auto" x-transition.opacity>
                     <h3 class="text-base md:text-lg font-bold mb-4 text-blue-400">Редактирование профиля</h3>
                     <div class="flex flex-col items-center mb-4">
                         <div class="w-20 h-20 md:w-24 md:h-24 rounded-full bg-blue-600 mb-2 flex items-center justify-center text-3xl font-bold overflow-hidden relative group">
@@ -1067,7 +1128,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     </div>
                 </div>
 
-                <div x-show="privacyMode" class="p-6 overflow-y-auto">
+                <div x-show="privacyMode" class="p-6 overflow-y-auto" x-transition.opacity>
                     <h3 class="text-base md:text-lg font-bold mb-4 text-blue-400 flex items-center gap-2">
                         <span>🔒</span><span>Кто видит мою информацию</span>
                     </h3>
@@ -1115,7 +1176,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         </div>
 
-        <div x-show="showQuestsModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" @click.self="showQuestsModal = false">
+        <div x-show="showQuestsModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4" x-transition.opacity.duration.200ms @click.self="showQuestsModal = false">
             <div class="bg-[#1e293b] p-6 rounded-2xl border border-blue-500/40 w-full max-w-md shadow-2xl text-white max-h-[85vh] overflow-y-auto">
                 <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-3">
                     <div class="flex items-center gap-2">
@@ -1147,7 +1208,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         </div>
 
-        <div x-show="showShopModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" @click.self="showShopModal = false">
+        <div x-show="showShopModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" x-transition.opacity.duration.200ms @click.self="showShopModal = false">
             <div class="bg-[#1e293b] p-6 rounded-2xl border border-blue-500/40 w-full max-w-lg shadow-2xl text-white max-h-[90vh] flex flex-col">
                 <div class="flex justify-between items-center mb-4 flex-shrink-0 border-b border-gray-700 pb-3">
                     <div class="flex items-center gap-2">
@@ -1171,13 +1232,13 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
                 <div class="flex-1 overflow-y-auto min-h-[250px] pr-1">
                     <template x-if="!shopModeInventory && shopTab === 'official'">
-                        <div class="grid grid-cols-2 gap-3">
+                        <div class="grid grid-cols-2 gap-3" x-transition.opacity>
                             <template x-for="item in shopOfficial" :key="item.def_id">
                                 <div class="bg-gray-800/60 border border-gray-700/80 rounded-2xl p-3.5 flex flex-col items-center text-center justify-between group hover:border-blue-500 transition">
                                     <img :src="item.img" class="w-16 h-16 md:w-20 md:h-20 object-contain my-2 filter drop-shadow-md group-hover:scale-110 transition transform">
                                     <div class="w-full">
                                         <div class="font-bold text-sm text-white truncate" x-text="item.name"></div>
-                                        <button @click="executeBuyOfficialGift(def_id=item.def_id)" class="w-full mt-2.5 bg-blue-600 hover:bg-blue-500 text-white font-black py-2 rounded-xl text-xs shadow-md transition flex items-center justify-center gap-1">
+                                        <button @click="executeBuyOfficialGift(item.def_id)" class="w-full mt-2.5 bg-blue-600 hover:bg-blue-500 text-white font-black py-2 rounded-xl text-xs shadow-md transition flex items-center justify-center gap-1">
                                             <span>Купить за</span><span x-text="item.price"></span><img src="/molniya.png" class="w-4 h-4 inline-block align-middle">
                                         </button>
                                     </div>
@@ -1186,7 +1247,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         </div>
                     </template>
                     <template x-if="!shopModeInventory && shopTab === 'market'">
-                        <div>
+                        <div x-transition.opacity>
                             <template x-if="shopMarket.length === 0">
                                 <div class="text-center py-10 text-gray-500 text-sm italic">На рынке пока нет выставленных подарков</div>
                             </template>
@@ -1208,7 +1269,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         </div>
                     </template>
                     <template x-if="shopModeInventory">
-                        <div>
+                        <div x-transition.opacity>
                             <template x-if="myGiftsInventory.length === 0">
                                 <div class="text-center py-10 text-gray-500 text-sm italic">У вас пока нет подарков. Приобретите их в магазине!</div>
                             </template>
@@ -1236,7 +1297,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
             </div>
         </div>
 
-        <div x-show="showPartnerGiftsModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" @click.self="showPartnerGiftsModal = false">
+        <div x-show="showPartnerGiftsModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" x-transition.opacity.duration.200ms @click.self="showPartnerGiftsModal = false">
              <div class="bg-[#1e293b] p-6 rounded-3xl border border-blue-500/40 w-full max-w-md shadow-2xl text-white max-h-[85vh] flex flex-col">
                 <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-3 flex-shrink-0">
                     <div class="flex items-center gap-2">
@@ -1263,7 +1324,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
              </div>
         </div>
 
-        <div x-show="showGiftViewModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" @click.self="showGiftViewModal = false">
+        <div x-show="showGiftViewModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" x-transition.opacity.duration.200ms @click.self="showGiftViewModal = false">
             <div class="bg-[#1e293b] p-6 rounded-3xl border border-blue-500/40 w-full max-w-xs shadow-2xl text-white text-center flex flex-col items-center relative">
                 <button @click="showGiftViewModal = false" class="absolute top-4 right-4 text-gray-400 hover:text-white font-bold">✕</button>
                 <div class="text-xs font-mono text-blue-400 font-bold bg-blue-500/10 border border-blue-500/30 px-3 py-1 rounded-full mb-3">
@@ -1304,7 +1365,12 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 currentChat: null,
                 messages: [],
                 newMessage: '',
+                
                 imagePreview: null,
+                videoPreview: null,
+                filePreview: null,
+                previewFileName: null,
+                
                 typing: {},
                 
                 showEmojiPicker: false,
@@ -1835,21 +1901,24 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     if(!this.currentChat.is_group) return !this.currentChat.partner_is_banned && !this.currentChat.i_blocked_partner && !this.currentChat.partner_blocked_me;
                     if(this.currentChat.i_am_banned_in_group) return false;
                     if(this.currentChat.i_am_admin || this.currentChat.i_am_owner) return true;
-                    return this.currentChat.perms.send_text || this.currentChat.perms.send_photos || this.currentChat.perms.send_voice || this.imagePreview;
+                    return this.currentChat.perms.send_text || this.currentChat.perms.send_photos || this.currentChat.perms.send_voice || this.imagePreview || this.videoPreview || this.filePreview;
                 },
 
-                handleImageSelect(event) {
+                handleFileSelect(event, type) {
                     const file = event.target.files[0];
                     if (!file) return;
                     const reader = new FileReader();
-                    reader.onload = (e) => { this.imagePreview = e.target.result; };
+                    reader.onload = (e) => { 
+                        if (type === 'photo') { this.imagePreview = e.target.result; this.videoPreview = null; this.filePreview = null; }
+                        else if (type === 'video') { this.videoPreview = e.target.result; this.imagePreview = null; this.filePreview = null; }
+                        else if (type === 'file') { this.filePreview = e.target.result; this.previewFileName = file.name; this.imagePreview = null; this.videoPreview = null; }
+                    };
                     reader.readAsDataURL(file);
                 },
+                
                 sendMessage() {
-                    if (!this.newMessage.trim() && !this.imagePreview) return;
+                    if (!this.newMessage.trim() && !this.imagePreview && !this.videoPreview && !this.filePreview) return;
                     
-                    if(this.$refs.msgInput) this.$refs.msgInput.focus();
-
                     if (this.editMessage) {
                         this.socket.emit('edit_message', {
                             message_id: this.editMessage.id, text: this.newMessage.trim()
@@ -1860,12 +1929,13 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         let payload = {
                             client_temp_id: tempId,
                             chat_id: this.currentChat.chat_id, text: this.newMessage.trim(),
-                            image_base64: this.imagePreview, reply_to_id: this.replyToMessage ? this.replyToMessage.id : null
+                            image_base64: this.imagePreview, video_base64: this.videoPreview, file_base64: this.filePreview, file_name: this.previewFileName,
+                            reply_to_id: this.replyToMessage ? this.replyToMessage.id : null
                         };
-                        let repText = this.replyToMessage ? (this.replyToMessage.voice_base64 ? '[Голосовое]' : (this.replyToMessage.text || '[Фото]')) : '';
+                        let repText = this.replyToMessage ? (this.replyToMessage.voice_base64 ? '[Голосовое]' : (this.replyToMessage.text || '[Фото/Файл]')) : '';
                         let localObj = {
                             id: tempId, client_temp_id: tempId, sender_id: this.myId,
-                            text: payload.text, image_base64: payload.image_base64, voice_base64: null,
+                            text: payload.text, image_base64: payload.image_base64, video_base64: payload.video_base64, file_base64: payload.file_base64, file_name: payload.file_name, voice_base64: null,
                             time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
                             is_read: false, is_deleted: false, is_edited: false,
                             is_pending: true,
@@ -1883,6 +1953,9 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     }
                     this.newMessage = '';
                     this.imagePreview = null;
+                    this.videoPreview = null;
+                    this.filePreview = null;
+                    this.previewFileName = null;
                     this.showEmojiPicker = false;
                 },
 
@@ -1924,7 +1997,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                     client_temp_id: tempId, chat_id: this.currentChat.chat_id, 
                                     voice_base64: base64Audio, reply_to_id: this.replyToMessage ? this.replyToMessage.id : null
                                 };
-                                let repText = this.replyToMessage ? (this.replyToMessage.voice_base64 ? '[Голосовое]' : (this.replyToMessage.text || '[Фото]')) : '';
+                                let repText = this.replyToMessage ? (this.replyToMessage.voice_base64 ? '[Голосовое]' : (this.replyToMessage.text || '[Фото/Файл]')) : '';
                                 let localObj = {
                                     id: tempId, client_temp_id: tempId, sender_id: this.myId,
                                     text: '', image_base64: null, voice_base64: base64Audio,
@@ -1949,6 +2022,16 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     } catch (err) {
                         alert('Не удалось получить доступ к микрофону: ' + err.message);
                         this.isRecording = false;
+                    }
+                },
+                cancelRecording() {
+                    if (this.mediaRecorder && this.isRecording) {
+                        this.isRecording = false;
+                        clearInterval(this.recordInterval);
+                        this.mediaRecorder.onstop = null; // Отменяем событие отправки
+                        this.mediaRecorder.stop();
+                        this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
+                        this.audioChunks = [];
                     }
                 },
                 stopRecording() { if (this.mediaRecorder && this.isRecording) this.mediaRecorder.stop(); },
@@ -2074,7 +2157,7 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
              </table>
         </div>
 
-        <div x-show="showPermsModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="showPermsModal = false">
+        <div x-show="showPermsModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" x-transition.opacity.duration.200ms @click.self="showPermsModal = false">
             <div class="bg-[#1e293b] p-6 rounded-2xl border border-gray-700 w-full max-w-sm shadow-2xl">
                 <h3 class="text-white font-bold text-lg mb-4 border-b border-gray-700 pb-2">Права пользователя</h3>
                 <div class="space-y-2.5 mb-6 max-h-60 overflow-y-auto pr-1">
@@ -2094,7 +2177,7 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
             </div>
          </div>
 
-        <div x-show="showBanModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="showBanModal = false">
+        <div x-show="showBanModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" x-transition.opacity.duration.200ms @click.self="showBanModal = false">
             <div class="bg-[#1e293b] p-6 rounded-xl border border-red-700 w-full max-w-sm shadow-2xl">
                 <h3 class="text-red-400 font-bold text-lg mb-4 border-b border-gray-700 pb-2">Блокировка: <span class="text-white" x-text="banTargetName"></span></h3>
                 <div class="space-y-4 mb-6">
@@ -2117,7 +2200,7 @@ ADMIN_TEMPLATE = BASE_HTML_HEAD + """
              </div>
         </div>
 
-        <div x-show="showHistoryModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="showHistoryModal = false">
+        <div x-show="showHistoryModal" style="display: none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" x-transition.opacity.duration.200ms @click.self="showHistoryModal = false">
             <div class="bg-[#1e293b] p-6 rounded-xl border border-gray-700 w-full max-w-lg shadow-2xl flex flex-col max-h-[80vh]">
                 <h3 class="text-white font-bold text-lg mb-4 border-b border-gray-700 pb-2">Общение за 24ч: <span class="text-blue-400" x-text="historyUserName"></span></h3>
                 <div class="flex-1 overflow-y-auto mb-4">
@@ -2598,7 +2681,7 @@ def get_chats():
         if last_msg:
             if last_msg.voice_base64: lmsg_preview = '[Голосовое]'
             elif last_msg.text: lmsg_preview = last_msg.text
-            elif last_msg.image_base64: lmsg_preview = '[Фото]'
+            elif last_msg.image_base64 or last_msg.video_base64 or last_msg.file_base64: lmsg_preview = '[Вложение]'
 
         if chat.type == 'group':
             my_cp = ChatParticipant.query.filter_by(chat_id=cid, user_id=current_user.id).first()
@@ -2882,7 +2965,6 @@ def get_messages(chat_id):
     result = []
     see_edits = can_see_edits()
     
-    # Кэш пользователей для групп (чтобы быстро отдавать теги и имена)
     user_cache = {}
     if chat.type == 'group':
         for p in ChatParticipant.query.filter_by(chat_id=chat_id).all():
@@ -2896,7 +2978,7 @@ def get_messages(chat_id):
             if rm:
                 if rm.voice_base64: reply_text = "[Голосовое]"
                 elif rm.text: reply_text = (rm.text[:25] + "...") if len(rm.text) > 25 else rm.text
-                else: reply_text = "[Фото]"
+                else: reply_text = "[Вложение]"
 
         fwd_name = ""
         if m.forwarded_from_id:
@@ -2911,7 +2993,9 @@ def get_messages(chat_id):
             'sender_tag': sender_info.get('tag', ''),
             'sender_is_admin': sender_info.get('is_admin', False),
             'sender_is_owner': sender_info.get('is_owner', False),
-            'image_base64': m.image_base64, 'voice_base64': m.voice_base64,
+            'image_base64': m.image_base64, 'video_base64': m.video_base64, 
+            'file_base64': m.file_base64, 'file_name': m.file_name,
+            'voice_base64': m.voice_base64,
             'time': m.timestamp.strftime('%H:%M'),
             'is_read': m.is_read, 'is_deleted': m.is_deleted, 'is_edited': m.is_edited,
             'original_text': m.original_text if see_edits else None,
@@ -3151,6 +3235,9 @@ def handle_message(data):
     forwarded_from_id = data.get('forwarded_from_id')
     text = data.get('text', '')
     img = data.get('image_base64')
+    video = data.get('video_base64')
+    file_b64 = data.get('file_base64')
+    file_name = data.get('file_name')
     voice = data.get('voice_base64')
     client_temp_id = data.get('client_temp_id')
 
@@ -3167,13 +3254,13 @@ def handle_message(data):
         my_cp = ChatParticipant.query.filter_by(chat_id=chat_id, user_id=current_user.id).first()
         if not my_cp: return # Выгнали из группы
         if not (my_cp.is_admin or chat.owner_id == current_user.id):
-            if text and not chat.global_send_text and not voice and not img: return
-            if img and not chat.global_send_photos: return
+            if text and not chat.global_send_text and not voice and not img and not video and not file_b64: return
+            if (img or video or file_b64) and not chat.global_send_photos: return
             if voice and not chat.global_send_voice: return
 
     msg = Message(
         chat_id=chat_id, sender_id=current_user.id, 
-        text=text, image_base64=img, voice_base64=voice,
+        text=text, image_base64=img, video_base64=video, file_base64=file_b64, file_name=file_name, voice_base64=voice,
         reply_to_id=reply_to_id, forwarded_from_id=forwarded_from_id, is_read=False
     )
     db.session.add(msg)
@@ -3188,7 +3275,7 @@ def handle_message(data):
         if rm:
             if rm.voice_base64: reply_text = "[Голосовое]"
             elif rm.text: reply_text = (rm.text[:25] + "...") if len(rm.text) > 25 else rm.text
-            else: reply_text = "[Фото]"
+            else: reply_text = "[Вложение]"
 
     fwd_name = ""
     if forwarded_from_id:
@@ -3210,7 +3297,8 @@ def handle_message(data):
     msg_data = {
         'id': msg.id, 'chat_id': chat_id, 'sender_id': current_user.id,
         'client_temp_id': client_temp_id, 
-        'text': msg.text, 'image_base64': msg.image_base64, 'voice_base64': msg.voice_base64,
+        'text': msg.text, 'image_base64': msg.image_base64, 'video_base64': msg.video_base64,
+        'file_base64': msg.file_base64, 'file_name': msg.file_name, 'voice_base64': msg.voice_base64,
         'time': msg.timestamp.strftime('%H:%M'), 'is_read': False,
         'is_deleted': False, 'is_edited': False, 'original_text': None,
         'reply_to_id': reply_to_id, 'reply_text': reply_text,
@@ -3266,6 +3354,9 @@ def init_db():
             db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id INTEGER;"))
             db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS forwarded_from_id INTEGER;"))
             db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS voice_base64 TEXT;"))
+            db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS video_base64 TEXT;"))
+            db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_base64 TEXT;"))
+            db.session.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_name TEXT;"))
             
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_moderator BOOLEAN DEFAULT FALSE;"))
             db.session.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS perm_edit_history BOOLEAN DEFAULT FALSE;"))
