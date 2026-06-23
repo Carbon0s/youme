@@ -497,7 +497,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     <button @click="actionEdit()" class="px-4 py-3 md:py-2 text-left hover:bg-gray-700 text-white transition border-t border-gray-700">Изменить</button>
                 </template>
                 <button @click="actionForward()" class="px-4 py-3 md:py-2 text-left hover:bg-gray-700 text-white transition border-t border-gray-700">Переслать</button>
-                <template x-if="myProfileData.has_admin_priv || myProfileData.is_admin || myProfileData.can_see_deleted">
+                <template x-if="myProfileData.can_see_edits">
                     <button @click="actionShowHistory()" class="px-4 py-3 md:py-2 text-left hover:bg-gray-700 text-blue-400 border-t border-gray-700 transition">История</button>
                 </template>
                 <template x-if="contextMenu.canDelete">
@@ -551,7 +551,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                 <button @click="menuOpen = !menuOpen" class="p-2 text-gray-400 hover:text-white transition rounded-full hover:bg-gray-800">
                                     <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 24 24"><path d="M12 16a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2m0-6a2 2 0 012 2 2 2 0 01-2 2 2 2 0 01-2-2 2 2 0 012-2z"></path></svg>
                                 </button>
-                                <div x-show="menuOpen" @click.away="menuOpen = false" x-transition.opacity.duration.200ms class="absolute right-0 top-full mt-2 w-48 bg-gray-800 rounded-2xl shadow-2xl border border-gray-700 py-2 z-50 text-sm font-medium">
+                                <div x-show="menuOpen" style="display:none;" @click.away="menuOpen = false" x-transition.opacity.duration.200ms class="absolute right-0 top-full mt-2 w-48 bg-gray-800 rounded-2xl shadow-2xl border border-gray-700 py-2 z-50 text-sm font-medium">
                                     <button @click="menuOpen = false; openContactModal()" class="w-full text-left px-4 py-2 hover:bg-gray-700 text-white flex items-center gap-2">
                                         <span x-text="currentChat.is_explicit_contact ? 'Изменить контакт' : 'Добавить контакт'"></span>
                                     </button>
@@ -677,9 +677,9 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                         <span class="text-2xl">📁</span>
                                     </div>
                                 </template>
-                                <button @click="imagePreview = null; videoPreview = null; filePreview = null" class="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold shadow">✕</button>
+                                <button @click="imagePreview = null; videoPreview = null; filePreview = null; previewFileName = null" class="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold shadow">✕</button>
                             </div>
-                            <div x-show="filePreview" class="text-xs text-gray-400 mt-1 truncate max-w-[200px]" x-text="previewFileName"></div>
+                            <div x-show="filePreview" style="display:none;" class="text-xs text-gray-400 mt-1 truncate max-w-[200px]" x-text="previewFileName"></div>
                         </div>
 
                         <div x-show="showEmojiPicker" style="display:none;" x-transition.opacity.duration.200ms class="absolute bottom-full left-2 mb-2 bg-gray-800 border border-gray-700 p-3 rounded-2xl grid grid-cols-6 gap-2 md:gap-3 text-2xl shadow-2xl z-50">
@@ -774,6 +774,41 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     </div>
                 </div>
             </template>
+        </div>
+
+        <div x-show="forwardModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" x-transition.opacity.duration.200ms @click.self="forwardModal = false; forwardMessageTarget = null;">
+            <div class="bg-[#1e293b] rounded-2xl border border-gray-700 w-full max-w-sm shadow-2xl flex flex-col max-h-[80vh] overflow-hidden">
+                <div class="p-4 bg-gray-900 border-b border-gray-800 flex justify-between items-center">
+                    <h3 class="text-white font-bold text-lg">Переслать в...</h3>
+                    <button @click="forwardModal = false; forwardMessageTarget = null;" class="text-gray-400 hover:text-white font-bold text-lg px-2 transition">✕</button>
+                </div>
+                <div class="overflow-y-auto flex-1 p-2 bg-[#0f172a]">
+                    <template x-if="chats.length === 0">
+                        <div class="text-gray-500 text-sm italic text-center py-6">Нет доступных чатов</div>
+                    </template>
+                    <template x-for="c in chats" :key="c.chat_id">
+                        <div @click="executeForward(c.chat_id)" class="flex items-center gap-3 p-3 hover:bg-gray-800 rounded-xl cursor-pointer transition mb-1 border border-transparent hover:border-gray-700">
+                            <div class="w-12 h-12 rounded-full bg-gray-700 flex items-center justify-center text-white overflow-hidden flex-shrink-0" :class="c.is_group ? 'bg-gradient-to-tr from-green-500 to-blue-500' : ''">
+                                <img x-show="c.partner_avatar" :src="c.partner_avatar" class="w-full h-full object-cover">
+                                <span x-show="!c.partner_avatar && c.is_group">👥</span>
+                                <span x-show="!c.partner_avatar && !c.is_group" x-text="c.partner_name[0]"></span>
+                            </div>
+                            <div class="flex-1 min-w-0">
+                                <div class="text-base font-semibold text-white truncate" x-text="c.partner_name"></div>
+                                <div class="text-xs text-gray-500 truncate" x-text="c.is_group ? 'Группа' : 'Личный чат'"></div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+
+        <div x-show="showMessageHistoryModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" x-transition.opacity.duration.200ms @click.self="showMessageHistoryModal = false">
+            <div class="bg-[#1e293b] p-6 rounded-2xl border border-gray-700 w-full max-w-sm shadow-2xl flex flex-col">
+                <h3 class="text-white font-bold text-lg mb-4 border-b border-gray-700 pb-2">Оригинальное сообщение</h3>
+                <div class="bg-gray-900 p-4 rounded-xl border border-gray-800 text-gray-300 text-sm whitespace-pre-wrap break-words max-h-60 overflow-y-auto font-mono" x-text="historyText"></div>
+                <button @click="showMessageHistoryModal = false" class="mt-6 w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 rounded-xl transition shadow">Закрыть</button>
+            </div>
         </div>
 
         <div x-show="showGroupProfileModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4" x-transition.opacity.duration.200ms @click.self="showGroupProfileModal = false">
@@ -979,10 +1014,10 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
              <div class="bg-[#242f3d] w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden flex flex-col relative text-gray-100 max-h-[90vh]">
 
                 <div class="absolute top-4 right-4 flex gap-4 z-20">
-                    <button x-show="isMyProfile && !editMode && !privacyMode" @click="editMode = true" class="text-white hover:text-blue-400 drop-shadow-md">
+                    <button x-show="isMyProfile && !editMode && !privacyMode" @click="editMode = true" class="text-white hover:text-blue-400 drop-shadow-md transition">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
                     </button>
-                    <button @click="closeProfileModal()" class="text-white hover:text-red-400 drop-shadow-md">
+                    <button @click="closeProfileModal()" class="text-white hover:text-red-400 drop-shadow-md transition">
                         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                     </button>
                 </div>
@@ -1010,7 +1045,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                         <img :src="getPinnedGiftAt(slotIdx).img" class="w-9 h-9 md:w-10 md:h-10 object-contain filter drop-shadow">
                                     </template>
                                     <template x-if="!getPinnedGiftAt(slotIdx) && isMyProfile">
-                                        <span class="text-white/20 text-2xl group-hover:text-blue-400 font-extralight">+</span>
+                                        <span class="text-white/20 text-2xl group-hover:text-blue-400 font-extralight transition">+</span>
                                     </template>
                                 </div>
                             </template>
@@ -1068,7 +1103,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                             <span class="text-base">📁</span><span>Помощь</span>
                                         </div>
                                         <div class="bg-[#1c242f] rounded-xl p-3 border border-gray-800">
-                                            <a href="/micro" class="text-blue-400 hover:text-blue-300 hover:underline font-medium text-sm block">Включение микрофона</a>
+                                            <a href="/micro" class="text-blue-400 hover:text-blue-300 hover:underline font-medium text-sm block transition">Включение микрофона</a>
                                         </div>
                                     </div>
                                 </div>
@@ -1183,7 +1218,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         <img src="/molniya.png" class="w-8 h-8 object-contain" alt="⚡">
                         <h3 class="font-bold text-lg">Ежедневные задания</h3>
                     </div>
-                    <button @click="showQuestsModal = false" class="text-gray-400 hover:text-white font-bold text-lg">✕</button>
+                    <button @click="showQuestsModal = false" class="text-gray-400 hover:text-white font-bold text-lg transition">✕</button>
                 </div>
                 <p class="text-xs text-gray-400 mb-4">Выполняйте задания и получайте молнии для покупки подарков. Обновление каждый день в 00:00 (МСК)</p>
 
@@ -1219,7 +1254,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         <div class="bg-blue-500/20 border border-blue-500/40 px-3 py-1 rounded-full text-blue-300 font-mono font-bold text-xs flex items-center gap-1">
                             <span x-text="myLightnings"></span><img src="/molniya.png" class="w-4 h-4 inline-block align-middle">
                         </div>
-                        <button @click="showShopModal = false" class="text-gray-400 hover:text-white font-bold text-lg">✕</button>
+                        <button @click="showShopModal = false" class="text-gray-400 hover:text-white font-bold text-lg transition">✕</button>
                     </div>
                  </div>
 
@@ -1304,7 +1339,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                         <span class="text-2xl">🎁</span>
                         <h3 class="font-bold text-lg" x-text="'Подарки ' + (viewProfileData.first_name || '')"></h3>
                     </div>
-                    <button @click="showPartnerGiftsModal = false" class="text-gray-400 hover:text-white font-bold text-lg">✕</button>
+                    <button @click="showPartnerGiftsModal = false" class="text-gray-400 hover:text-white font-bold text-lg transition">✕</button>
                 </div>
                 <div class="flex-1 overflow-y-auto pr-1">
                     <template x-if="partnerGiftsList.length === 0">
@@ -1326,7 +1361,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
 
         <div x-show="showGiftViewModal" style="display:none;" class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4" x-transition.opacity.duration.200ms @click.self="showGiftViewModal = false">
             <div class="bg-[#1e293b] p-6 rounded-3xl border border-blue-500/40 w-full max-w-xs shadow-2xl text-white text-center flex flex-col items-center relative">
-                <button @click="showGiftViewModal = false" class="absolute top-4 right-4 text-gray-400 hover:text-white font-bold">✕</button>
+                <button @click="showGiftViewModal = false" class="absolute top-4 right-4 text-gray-400 hover:text-white font-bold transition">✕</button>
                 <div class="text-xs font-mono text-blue-400 font-bold bg-blue-500/10 border border-blue-500/30 px-3 py-1 rounded-full mb-3">
                     Подарок #<span x-text="selectedGiftView ? selectedGiftView.user_gift_id : ''"></span>
                 </div>
@@ -1426,7 +1461,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 editMessage: null,
                 forwardModal: false,
                 forwardMessageTarget: null,
-                showHistoryModal: false,
+                showMessageHistoryModal: false,
                 historyText: '',
 
                 showProfileModal: false,
@@ -1561,14 +1596,38 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     let tempId = 'pending_fwd_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4);
                     let payload = {
                         client_temp_id: tempId,
-                        chat_id: chatId, text: this.forwardMessageTarget.text,
-                        image_base64: this.forwardMessageTarget.image_base64, voice_base64: this.forwardMessageTarget.voice_base64,
+                        chat_id: chatId, 
+                        text: this.forwardMessageTarget.text || '',
+                        image_base64: this.forwardMessageTarget.image_base64 || null, 
+                        video_base64: this.forwardMessageTarget.video_base64 || null, 
+                        file_base64: this.forwardMessageTarget.file_base64 || null,
+                        file_name: this.forwardMessageTarget.file_name || null,
+                        voice_base64: this.forwardMessageTarget.voice_base64 || null,
                         forwarded_from_id: this.forwardMessageTarget.sender_id
                     };
+                    
                     this.pendingMessagesToSend[tempId] = payload;
                     this.savePendingQueue(); 
+
+                    if (this.currentChat && this.currentChat.chat_id === chatId) {
+                        let fwdName = this.forwardMessageTarget.sender_name || 'Пользователь';
+                        let localObj = {
+                            id: tempId, client_temp_id: tempId, sender_id: this.myId,
+                            text: payload.text, image_base64: payload.image_base64, video_base64: payload.video_base64, file_base64: payload.file_base64, file_name: payload.file_name, voice_base64: payload.voice_base64,
+                            time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
+                            is_read: false, is_deleted: false, is_edited: false,
+                            is_pending: true,
+                            reply_to_id: null, reply_text: '',
+                            forwarded_from_id: payload.forwarded_from_id, forwarded_from_name: fwdName
+                        };
+                        this.messages.push(localObj);
+                        this.scrollToBottom();
+                    }
+
                     if(this.socket.connected) this.socket.emit('send_message', payload);
-                    this.forwardModal = false; this.forwardMessageTarget = null; this.loadChats();
+                    this.forwardModal = false; 
+                    this.forwardMessageTarget = null; 
+                    this.loadChats();
                 },
                 actionDelete() {
                     this.contextMenu.show = false;
@@ -1576,8 +1635,8 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 },
                 actionShowHistory() {
                     this.contextMenu.show = false;
-                    this.historyText = this.contextMenu.msg.original_text || 'История изменений отсутствует.';
-                    this.showHistoryModal = true;
+                    this.historyText = this.contextMenu.msg.original_text || 'Оригинальный текст отсутствует.';
+                    this.showMessageHistoryModal = true;
                 },
 
                 async fetchMyProfile() {
@@ -1919,6 +1978,8 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                 sendMessage() {
                     if (!this.newMessage.trim() && !this.imagePreview && !this.videoPreview && !this.filePreview) return;
                     
+                    if(this.$refs.msgInput) this.$refs.msgInput.focus();
+
                     if (this.editMessage) {
                         this.socket.emit('edit_message', {
                             message_id: this.editMessage.id, text: this.newMessage.trim()
@@ -2028,7 +2089,7 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                     if (this.mediaRecorder && this.isRecording) {
                         this.isRecording = false;
                         clearInterval(this.recordInterval);
-                        this.mediaRecorder.onstop = null; // Отменяем событие отправки
+                        this.mediaRecorder.onstop = null; 
                         this.mediaRecorder.stop();
                         this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
                         this.audioChunks = [];
