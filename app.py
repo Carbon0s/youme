@@ -473,8 +473,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                     <div class="flex justify-between items-center mb-1">
                                         <div class="text-sm font-semibold truncate flex items-center gap-2 pr-2">
                                             <span class="truncate" :class="chat.partner_is_banned ? 'line-through text-red-500' : ''" x-text="chat.partner_name"></span>
-                                            <template x-if="!chat.is_group && chat.partner_is_admin"><span class="admin-badge flex-shrink-0">Admin</span></template>
-                                            <template x-if="!chat.is_group && chat.partner_is_moderator && !chat.partner_is_admin"><span class="mod-badge flex-shrink-0">Moderator</span></template>
                                         </div>
                                         <div class="text-[10px] text-gray-500 whitespace-nowrap flex-shrink-0" x-text="chat.last_time"></div>
                                     </div>
@@ -529,10 +527,8 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             </div>
                             <div class="flex flex-col min-w-0">
                                 <div class="flex items-center gap-2 min-w-0">
-                                    <div class="text-white font-semibold text-sm md:text-base truncate flex items-center gap-2">
-                                        <span class="truncate" x-text="currentChat.partner_name"></span>
-                                        <template x-if="!currentChat.is_group && currentChat.partner_is_admin"><span class="admin-badge flex-shrink-0">Admin</span></template>
-                                        <template x-if="!currentChat.is_group && currentChat.partner_is_moderator && !currentChat.partner_is_admin"><span class="mod-badge flex-shrink-0">Moderator</span></template>
+                                    <div class="text-white font-semibold text-sm md:text-base truncate flex items-center">
+                                        <span x-text="currentChat.partner_name"></span>
                                         <template x-if="currentChat.partner_is_banned">
                                             <span class="text-red-700 font-bold ml-1 flex-shrink-0"> — Заблокирован</span>
                                         </template>
@@ -577,14 +573,10 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                                      @touchend="handleTouchEnd()"
                                      @touchmove="handleTouchEnd()">
 
-                                    <template x-if="(currentChat.is_group || msg.sender_is_global_admin || msg.sender_is_global_mod) && msg.sender_id !== myId && !msg.is_deleted">
+                                    <template x-if="currentChat.is_group && msg.sender_id !== myId && !msg.is_deleted">
                                         <div class="text-[11px] font-bold mb-1 flex items-center gap-1.5 cursor-pointer" @click.stop="openUserProfile(msg.sender_id)">
                                             <span class="text-indigo-400 hover:underline truncate" x-text="msg.sender_name"></span>
-                                            
-                                            <template x-if="msg.sender_is_global_admin"><span class="admin-badge flex-shrink-0">Admin</span></template>
-                                            <template x-if="msg.sender_is_global_mod && !msg.sender_is_global_admin"><span class="mod-badge flex-shrink-0">Moderator</span></template>
-                                            
-                                            <template x-if="currentChat.is_group && msg.sender_tag">
+                                            <template x-if="msg.sender_tag">
                                                 <span :class="(msg.sender_is_admin || msg.sender_is_owner) ? 'group-tag-admin' : 'group-tag-user'" x-text="msg.sender_tag"></span>
                                             </template>
                                         </div>
@@ -1626,8 +1618,6 @@ APP_TEMPLATE = BASE_HTML_HEAD + """
                             is_read: false, is_deleted: false, is_edited: false,
                             is_pending: true,
                             reply_to_id: null, reply_text: '',
-                            sender_is_global_admin: this.myProfileData.is_admin,     // НОВАЯ СТРОКА
-                            sender_is_global_mod: this.myProfileData.is_moderator    // НОВАЯ СТРОКА
                             forwarded_from_id: payload.forwarded_from_id, forwarded_from_name: fwdName
                         };
                         this.messages.push(localObj);
@@ -3037,18 +3027,10 @@ def get_messages(chat_id):
     see_edits = can_see_edits()
     
     user_cache = {}
-    # Кэшируем пользователей для ВСЕХ чатов, чтобы вытащить глобальные роли
-    for p in ChatParticipant.query.filter_by(chat_id=chat_id).all():
-        u = User.query.get(p.user_id)
-        if u: 
-            user_cache[p.user_id] = {
-                'name': f"{u.first_name} {u.last_name or ''}", 
-                'tag': p.role_tag if chat.type == 'group' else '', 
-                'is_admin': p.is_admin if chat.type == 'group' else False, 
-                'is_owner': chat.owner_id == p.user_id if chat.type == 'group' else False,
-                'is_global_admin': u.is_admin,
-                'is_global_mod': u.is_moderator
-            }
+    if chat.type == 'group':
+        for p in ChatParticipant.query.filter_by(chat_id=chat_id).all():
+            u = User.query.get(p.user_id)
+            if u: user_cache[p.user_id] = {'name': f"{u.first_name} {u.last_name or ''}", 'tag': p.role_tag, 'is_admin': p.is_admin, 'is_owner': chat.owner_id == p.user_id}
 
     for m in messages:
         reply_text = ""
@@ -3072,8 +3054,6 @@ def get_messages(chat_id):
             'sender_tag': sender_info.get('tag', ''),
             'sender_is_admin': sender_info.get('is_admin', False),
             'sender_is_owner': sender_info.get('is_owner', False),
-            'sender_is_global_admin': sender_info.get('is_global_admin', False), # НОВАЯ СТРОКА
-            'sender_is_global_mod': sender_info.get('is_global_mod', False),     # НОВАЯ СТРОКА
             'image_base64': m.image_base64, 'video_base64': m.video_base64, 
             'file_base64': m.file_base64, 'file_name': m.file_name,
             'voice_base64': m.voice_base64,
@@ -3385,9 +3365,7 @@ def handle_message(data):
         'reply_to_id': reply_to_id, 'reply_text': reply_text,
         'forwarded_from_id': forwarded_from_id, 'forwarded_from_name': fwd_name,
         'sender_name': sender_name, 'sender_tag': sender_tag, 
-        'sender_is_admin': sender_is_admin, 'sender_is_owner': sender_is_owner,
-        'sender_is_global_admin': current_user.is_admin,       # НОВАЯ СТРОКА
-        'sender_is_global_mod': current_user.is_moderator      # НОВАЯ СТРОКА
+        'sender_is_admin': sender_is_admin, 'sender_is_owner': sender_is_owner
     }
     for p in ChatParticipant.query.filter_by(chat_id=chat_id).all():
         emit('new_message', msg_data, room=f"user_{p.user_id}")
