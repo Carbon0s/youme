@@ -3385,7 +3385,7 @@ def handle_message(data):
         'reply_to_id': reply_to_id, 'reply_text': reply_text,
         'forwarded_from_id': forwarded_from_id, 'forwarded_from_name': fwd_name,
         'sender_name': sender_name, 'sender_tag': sender_tag, 
-        'sender_is_admin': sender_is_admin, 'sender_is_owner': sender_is_owner
+        'sender_is_admin': sender_is_admin, 'sender_is_owner': sender_is_owner,
         'sender_is_global_admin': current_user.is_admin,       # НОВАЯ СТРОКА
         'sender_is_global_mod': current_user.is_moderator      # НОВАЯ СТРОКА
     }
